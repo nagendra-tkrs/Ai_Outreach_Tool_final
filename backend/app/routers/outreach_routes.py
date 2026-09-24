@@ -1,0 +1,230 @@
+import logging
+from typing import Optional
+from fastapi import APIRouter, Body, HTTPException, Query, Request, Response
+from app.config.database import get_database
+from app.services.email_service import send_outreach_email
+from app.services.outreach_service import (
+    bulk_generate_outreach,
+    delete_outreach_message,
+    generate_outreach_sequence,
+    get_all_outreach,
+    get_company_outreach,
+    update_outreach_message,
+)
+from app.services.outreach_tracking_service import (
+    generate_outreach_excel_buffer,
+    get_outreach_records,
+    get_outreach_stats,
+    update_reply_status,
+)
+from app.services.scheduler_service import schedule_sequence_steps
+from app.utils.bson_utils import is_valid_object_id, serialize_doc, to_object_id
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+# ---------------- Company-specific outreach routes ----------------
+
+
+@router.post("/companies/{company_id}/outreach/generate")
+@router.post("/{company_id}/outreach/generate")
+async def generate_sequence(company_id: str, payload: dict = Body(...)):
+    messages = await generate_outreach_sequence(company_id, payload)
+    return {
+        "success": True,
+        "message": "Personalized outreach sequence generated",
+        "data": messages,
+    }
+
+
+@router.post("/companies/{company_id}/outreach/schedule")
+@router.post("/{company_id}/outreach/schedule")
+async def schedule_sequence(company_id: str, payload: dict = Body(...)):
+    schedules = payload.get("schedules", [])
+    updated = await schedule_sequence_steps(company_id, schedules)
+    return {
+        "success": True,
+        "message": "Automated sequence schedule activated",
+        "data": updated,
+    }
+
+
+@router.get("/companies/{company_id}/outreach")
+@router.get("/{company_id}/outreach")
+async def get_outreach(company_id: str):
+    messages = await get_company_outreach(company_id)
+    return {"success": True, "data": messages}
+
+
+# ---------------- Global Outreach Tracking & Reporting ----------------
+
+
+@router.get("/records")
+async def get_tracking_records(
+    page: int = Query(1, ge=1),
+    limit: int = Query(25, ge=1),
+    status: Optional[str] = Query(None),
+    replyStatus: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    sortBy: Optional[str] = Query("updatedAt"),
+    sortDir: Optional[str] = Query("desc"),
+):
+    params = {
+        "page": page,
+        "limit": limit,
+        "status": status,
+        "replyStatus": replyStatus,
+        "search": search,
+        "sortBy": sortBy,
+        "sortDir": sortDir,
+    }
+    result = await get_outreach_records(params)
+    return {
+        "success": True,
+        "data": result["records"],
+        "pagination": result["pagination"],
+    }
+
+
+@router.get("/records/{record_id}")
+async def get_single_tracking_record(record_id: str):
+    if not is_valid_object_id(record_id):
+        raise HTTPException(status_code=400, detail="Invalid record ID")
+
+    db = get_database()
+    record = await db.outreachrecords.find_one({"_id": to_object_id(record_id)})
+    if not record:
+        raise HTTPException(status_code=404, detail="Outreach tracking record not found")
+
+    # Populate companyId
+    if record.get("companyId"):
+        comp = await db.companies.find_one(
+            {"_id": record["companyId"]},
+            {"companyName": 1, "website": 1, "industry": 1, "country": 1},
+        )
+        if comp:
+            record["companyId"] = serialize_doc(comp)
+
+    # Populate contactId
+    if record.get("contactId"):
+        cnt = await db.contacts.find_one(
+            {"_id": record["contactId"]},
+            {"name": 1, "title": 1, "email": 1, "roleCategory": 1},
+        )
+        if cnt:
+            record["contactId"] = serialize_doc(cnt)
+
+    return {"success": True, "data": serialize_doc(record)}
+
+
+@router.patch("/records/{record_id}/reply")
+@router.post("/records/{record_id}/reply")
+async def update_tracking_reply(record_id: str, payload: dict = Body(...)):
+    reply_status = payload.get("replyStatus")
+    if not reply_status:
+        raise HTTPException(status_code=400, detail="replyStatus is required")
+
+    updated = await update_reply_status(record_id, reply_status)
+    return {
+        "success": True,
+        "message": f"Reply status updated to {updated.get('replyStatus')}",
+        "data": updated,
+    }
+
+
+@router.get("/stats")
+async def get_tracking_stats():
+    stats = await get_outreach_stats()
+    return {"success": True, "data": stats}
+
+
+@router.get("/export")
+async def export_outreach_excel(
+    status: Optional[str] = Query(None),
+    replyStatus: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+):
+    query_params = {
+        "status": status,
+        "replyStatus": replyStatus,
+        "search": search,
+    }
+    buffer, filename = await generate_outreach_excel_buffer(query_params)
+    return Response(
+        content=buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------- Direct / Global Outbox Message routes ----------------
+
+
+@router.get("/all")
+async def get_global_outbox(
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1),
+    status: Optional[str] = Query(None),
+    step: Optional[int] = Query(None),
+    companyId: Optional[str] = Query(None),
+):
+    query = {
+        "page": page,
+        "limit": limit,
+        "status": status,
+        "step": step,
+        "companyId": companyId,
+    }
+    messages = await get_all_outreach(query)
+    return {"success": True, "data": messages}
+
+
+@router.post("/bulk-generate")
+async def bulk_generate(payload: dict = Body(...)):
+    company_ids = payload.get("companyIds", [])
+    options = payload.get("options", {})
+    results = await bulk_generate_outreach(company_ids, options)
+    return {
+        "success": True,
+        "message": "Bulk outreach generation completed",
+        "data": results,
+    }
+
+
+@router.put("/{message_id}")
+async def update_message(message_id: str, payload: dict = Body(...)):
+    message = await update_outreach_message(message_id, payload)
+    return {
+        "success": True,
+        "message": "Draft updated successfully",
+        "data": message,
+    }
+
+
+@router.delete("/{message_id}")
+async def remove_message(message_id: str):
+    result = await delete_outreach_message(message_id)
+    return {"success": True, "message": result.get("message", "Message deleted")}
+
+
+@router.post("/{message_id}/send")
+async def send_email(message_id: str, payload: dict = Body(...)):
+    recipient_email = payload.get("recipientEmail")
+    cc_recipients = payload.get("ccRecipients")
+    bcc_recipients = payload.get("bccRecipients")
+
+    result = await send_outreach_email(
+        message_id,
+        {
+            "recipientEmail": recipient_email,
+            "ccRecipients": cc_recipients,
+            "bccRecipients": bcc_recipients,
+        },
+    )
+    return {
+        "success": True,
+        "message": "Email dispatched successfully",
+        "data": result,
+    }
