@@ -88,7 +88,7 @@ export default function Settings() {
         smtp: formData.smtp,
         recipientEmail: testEmail,
       });
-      setTestResult(res.data);
+      setTestResult(res.data || res);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -355,10 +355,17 @@ export default function Settings() {
                   <input
                     type="number"
                     value={formData.smtp.port}
-                    onChange={(e) => setFormData({
-                      ...formData,
-                      smtp: { ...formData.smtp, port: Number(e.target.value) }
-                    })}
+                    onChange={(e) => {
+                      const portNum = Number(e.target.value);
+                      setFormData({
+                        ...formData,
+                        smtp: {
+                          ...formData.smtp,
+                          port: portNum,
+                          secure: portNum === 465 ? true : (portNum === 587 ? false : formData.smtp.secure)
+                        }
+                      });
+                    }}
                     className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                     placeholder="587"
                   />

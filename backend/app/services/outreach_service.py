@@ -1,4 +1,5 @@
 import re
+import logging
 from datetime import datetime, timedelta
 from fastapi import HTTPException
 from app.config.database import get_db
@@ -10,6 +11,8 @@ from app.services.ai_service import (
     generate_fallback_outreach
 )
 
+logger = logging.getLogger(__name__)
+
 async def generate_outreach_sequence(company_id: str, options: dict = None) -> list[dict]:
     if options is None:
         options = {}
@@ -17,7 +20,6 @@ async def generate_outreach_sequence(company_id: str, options: dict = None) -> l
     contact_id = options.get('contactId')
     angle = options.get('angle', 'pain_point')
     tone = options.get('tone', 'conversational')
-    focus_service = options.get('focusService', 'AI Strategy Consulting')
 
     db = get_db()
     cid = to_object_id(company_id)
@@ -28,13 +30,32 @@ async def generate_outreach_sequence(company_id: str, options: dict = None) -> l
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
 
+    # Authoritative Validation (Phase 2):
+    # Both Evidence and Recommended Service must exist on the company record
+    company_evidence = (company.get('evidence') or '').strip()
+    company_rec_service = (company.get('recommendedService') or '').strip()
+
+    if not company_evidence:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required Evidence for outreach generation. Please configure Evidence in the company record or re-import."
+        )
+
+    if not company_rec_service:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required Recommended Service for outreach generation. Please configure Recommended Service in the company record or re-import."
+        )
+
+    # Core Rule: company.recommendedService is strictly authoritative.
+    # Frontend focusService must NOT override company.recommendedService.
+    focus_service = company_rec_service
+
     contact = None
     if contact_id:
         contact = await db.contacts.find_one({"_id": to_object_id(contact_id)})
     if not contact:
         contact = await db.contacts.find_one({"companyId": cid}, sort=[("overallScore", -1)])
-
-    research = await db.companyresearches.find_one({"companyId": cid})
 
     sender = {
         'senderName': 'Nagendra',
@@ -61,27 +82,47 @@ async def generate_outreach_sequence(company_id: str, options: dict = None) -> l
         contact_title = (contact.get('title') if contact else 'Executive Leadership')
         company_name = company.get('companyName', '')
 
-        system_prompt = f"""You are a world-class enterprise AI B2B copywriter representing "{sender['companyName']}".
-You write short, punchy, professional, and evidence-based outreach emails to decision makers.
-CRITICAL RULES:
-- Focus on the SINGLE MOST RELEVANT problem for the prospect and explain how "{focus_service}" from {sender['companyName']} solves that specific challenge.
-- DO NOT dump a bulleted laundry list of all services.
-- Directly address the recipient by name ({contact_name}) and acknowledge their role as {contact_title} at {company_name}.
-- Keep each email under 130 words.
-- Tone: {tone}.
-- Angle: {angle}.
-- Output strict JSON with key "sequence"."""
+        system_prompt = f"""You are a world-class enterprise B2B outreach copywriter representing "{sender['companyName']}".
+You write short, punchy, professional, and strictly evidence-backed outreach emails to decision makers.
+
+AUTHORITATIVE CORE RULES:
+1. PRIMARY EVIDENCE IS THE ONLY PERSONALIZATION SOURCE:
+   - Ground all personalization strictly in the supplied PRIMARY EVIDENCE.
+   - STRICT ANTI-HALLUCINATION: Do NOT invent unmentioned company initiatives, AI projects, automation projects, digital transformation claims, technology adoption, partnerships, customers, statistics, revenue, employee numbers, ROI metrics, future plans, internal problems, or technology stacks.
+   - If the evidence does not state that the company uses AI or has an AI initiative, DO NOT claim or imply they do.
+2. RECOMMENDED SERVICE IS AUTHORITATIVE:
+   - The RECOMMENDED TKSR SERVICE "{focus_service}" is strictly authoritative.
+   - You MUST use the exact service name "{focus_service}" in ALL 3 steps of the sequence.
+   - Do NOT replace, alter, rename, or substitute this service under any circumstances.
+3. THREE-STEP SEQUENCE STRUCTURE:
+   - Step 1 (Initial Outreach): Ground in PRIMARY EVIDENCE -> Connect to relevant business opportunity -> Introduce "{focus_service}" -> State practical value -> Specific CTA (< 130 words).
+   - Step 2 (Follow-up): Reference the original evidence -> Practical value -> Same "{focus_service}" -> Simple low-friction CTA (< 100 words).
+   - Step 3 (Final Follow-up): Brief reference -> Same business opportunity -> Same "{focus_service}" -> Low-pressure closing CTA (< 80 words).
+4. RECIPIENT:
+   - Address the recipient by name ({contact_name}) and acknowledge their role as {contact_title} at {company_name}.
+5. TONE: {tone}.
+6. STRICT JSON OUTPUT: Return a valid JSON object with key "sequence" containing exactly 3 step objects."""
 
         user_prompt = f"""Generate a 3-step cold outreach sequence from {sender['senderName']} ({sender['senderTitle']}, {sender['companyName']}) to:
-Prospect: {contact_name}
-Designation: {contact_title}
-Company: {company_name} ({company.get('website')})
-Industry: {company.get('industry') or 'B2B'}
-Target Service Focus: {focus_service}
 
-Company Research & AI Context:
-{research.get('summary', '') if research else 'Growing technology company scaling operations.'}
-Pain Points: {research.get('detectedPainPoints', []) if research else []}
+Company Name: {company_name}
+Website: {company.get('website', '')}
+Industry: {company.get('industry') or 'B2B'}
+Decision Maker Name: {contact_name}
+Decision Maker Role: {contact_title}
+Decision Maker Email: {contact.get('email', '') if contact else ''}
+
+PRIMARY EVIDENCE:
+{company_evidence}
+
+RECOMMENDED TKSR SERVICE:
+{focus_service}
+
+CRITICAL MANDATES:
+- The PRIMARY EVIDENCE is the only authoritative source for company-specific personalization.
+- The RECOMMENDED TKSR SERVICE is authoritative.
+- Do not change or substitute the Recommended Service. Every email must use "{focus_service}".
+- Do NOT invent company facts, projects, or statistics outside the PRIMARY EVIDENCE.
 
 Return a strict JSON object with this exact schema:
 {{
@@ -90,7 +131,7 @@ Return a strict JSON object with this exact schema:
       "step": 1,
       "stepLabel": "Step 1: Strategic AI Opportunity",
       "subject": "Concise compelling subject line (under 7 words)",
-      "bodyText": "Plain text email under 130 words tailored specifically to {focus_service}",
+      "bodyText": "Plain text email under 130 words grounded in PRIMARY EVIDENCE and featuring {focus_service}",
       "bodyHtml": "<p>HTML email body with clean paragraph formatting</p>",
       "linkedinNote": "Short LinkedIn connection note under 280 characters",
       "linkedinInmail": "Direct InMail message copy"
@@ -99,7 +140,7 @@ Return a strict JSON object with this exact schema:
       "step": 2,
       "stepLabel": "Step 2: Practical Value & Workflow Proof",
       "subject": "Re: Follow up subject line",
-      "bodyText": "Follow-up email under 100 words",
+      "bodyText": "Follow-up email under 100 words referencing the same evidence and {focus_service}",
       "bodyHtml": "<p>HTML email body for step 2</p>",
       "linkedinNote": "Follow-up connection note",
       "linkedinInmail": "Follow-up InMail copy"
@@ -108,7 +149,7 @@ Return a strict JSON object with this exact schema:
       "step": 3,
       "stepLabel": "Step 3: Low-Friction Invitation",
       "subject": "Final check-in subject line",
-      "bodyText": "Low-friction breakup/check-in email under 80 words",
+      "bodyText": "Low-friction check-in email under 80 words referencing the same opportunity and {focus_service}",
       "bodyHtml": "<p>HTML email body for step 3</p>",
       "linkedinNote": "Final check-in note",
       "linkedinInmail": "Final check-in InMail copy"
@@ -119,16 +160,17 @@ Return a strict JSON object with this exact schema:
         try:
             res_data = None
             if ai_config.get('provider') == 'ollama':
+                logger.info(f"[Ollama Prompt] Dispatched with PRIMARY EVIDENCE: '{company_evidence}' | RECOMMENDED SERVICE: '{focus_service}'")
                 res_data = await call_ai(user_prompt, system_prompt, ai_config)
 
             if res_data and isinstance(res_data.get('sequence'), list) and res_data['sequence']:
                 generated_steps = res_data['sequence']
         except Exception as e:
             print(f"AI sequence generation failed: {e}")
-            generated_steps = generate_fallback_outreach(company, research or {}, contact or {}, sender, angle, tone, focus_service)
+            generated_steps = generate_fallback_outreach(company, {}, contact or {}, sender, angle, tone, focus_service)
 
     if not generated_steps:
-        generated_steps = generate_fallback_outreach(company, research or {}, contact or {}, sender, angle, tone, focus_service)
+        generated_steps = generate_fallback_outreach(company, {}, contact or {}, sender, angle, tone, focus_service)
 
     # Preserve existing CC / BCC
     existing_meta_map = {}
@@ -151,7 +193,9 @@ Return a strict JSON object with this exact schema:
             'subject': item.get('subject', ''),
             'bodyHtml': item.get('bodyHtml', ''),
             'bodyText': item.get('bodyText') or re.sub(r'<[^>]*>?', '', item.get('bodyHtml', '')),
-            'focusService': focus_service or 'AI Strategy Consulting',
+            'focusService': focus_service,
+            'evidenceUsed': company_evidence,
+            'recommendedServiceUsed': focus_service,
             'linkedinNote': item.get('linkedinNote', ''),
             'linkedinInmail': item.get('linkedinInmail', ''),
             'angle': item.get('angle', angle),
@@ -237,7 +281,8 @@ async def update_outreach_message(message_id: str, update_data: dict):
 
     allowed_fields = [
         'subject', 'bodyHtml', 'bodyText', 'recipientEmail', 'recipientName',
-        'ccRecipients', 'bccRecipients', 'focusService', 'linkedinNote', 'linkedinInmail'
+        'ccRecipients', 'bccRecipients', 'focusService', 'evidenceUsed', 'recommendedServiceUsed',
+        'linkedinNote', 'linkedinInmail'
     ]
     set_fields = {'isManuallyEdited': True, 'updatedAt': datetime.utcnow()}
     for f in allowed_fields:

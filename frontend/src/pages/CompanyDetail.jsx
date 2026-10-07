@@ -59,6 +59,31 @@ const EMAIL_STATUS_META = {
     pillClass: 'bg-amber-50 text-amber-900 border-amber-300 font-semibold',
     icon: '⚠'
   },
+  PATTERN_INFERRED: {
+    label: 'PATTERN_INFERRED',
+    pillClass: 'bg-purple-50 text-purple-900 border-purple-300 font-semibold',
+    icon: '✦'
+  },
+  SEARCH_TIMEOUT: {
+    label: 'SEARCH_TIMEOUT',
+    pillClass: 'bg-orange-50 text-orange-900 border-orange-300 font-semibold',
+    icon: '⏱'
+  },
+  SEARCH_UNAVAILABLE: {
+    label: 'SEARCH_UNAVAILABLE',
+    pillClass: 'bg-rose-50 text-rose-900 border-rose-300 font-semibold',
+    icon: '⚡'
+  },
+  DOMAIN_BLOCKED: {
+    label: 'DOMAIN_BLOCKED',
+    pillClass: 'bg-red-50 text-red-900 border-red-300 font-semibold',
+    icon: '🚫'
+  },
+  NEEDS_REVIEW: {
+    label: 'NEEDS_REVIEW',
+    pillClass: 'bg-yellow-50 text-yellow-900 border-yellow-300 font-semibold',
+    icon: '👁'
+  },
   NOT_FOUND: {
     label: 'NOT_FOUND',
     pillClass: 'bg-slate-100 text-slate-600 border-slate-200 font-medium',
@@ -68,11 +93,26 @@ const EMAIL_STATUS_META = {
 
 const resolveUserFacingEmailStatus = (contact) => {
   if (!contact) return 'NOT_FOUND';
-  const raw = contact.emailStatus || contact.status;
+  const raw = contact.emailStatus || contact.email_status || contact.status;
   if (raw === 'EXACT_FOUND' || contact.isExactPublished || raw === 'DIRECTLY_VERIFIED' || raw === 'EXACT_PUBLIC_SOURCE' || raw === 'EXACT_SOURCE_VERIFIED') {
     return 'EXACT_FOUND';
   }
-  if (contact.email && (raw === 'PATTERN_GENERATED' || contact.emailVerificationMethod === 'PATTERN_INFERENCE' || contact.email_verification === 'PATTERN_INFERENCE' || raw === 'pattern_derived')) {
+  if (raw === 'SEARCH_TIMEOUT') {
+    return 'SEARCH_TIMEOUT';
+  }
+  if (raw === 'SEARCH_UNAVAILABLE') {
+    return 'SEARCH_UNAVAILABLE';
+  }
+  if (raw === 'DOMAIN_BLOCKED') {
+    return 'DOMAIN_BLOCKED';
+  }
+  if (raw === 'NEEDS_REVIEW') {
+    return 'NEEDS_REVIEW';
+  }
+  if (contact.email && (raw === 'PATTERN_INFERRED' || contact.emailVerificationMethod === 'PATTERN_INFERENCE')) {
+    return 'PATTERN_INFERRED';
+  }
+  if (contact.email && (raw === 'PATTERN_GENERATED' || raw === 'pattern_derived')) {
     return 'PATTERN_GENERATED';
   }
   if (contact.email) {
@@ -156,6 +196,9 @@ export default function CompanyDetail() {
       const res = await api.get('/companies', { params: { limit: 1000 } });
       const found = res.data.companies.find((c) => c._id === companyId);
       setCompany(found);
+      if (found?.recommendedService) {
+        setSelectedFocusService(found.recommendedService);
+      }
     } catch (err) {
       setError(err.message);
     }
@@ -642,6 +685,48 @@ export default function CompanyDetail() {
           <button onClick={() => setSuccessMsg('')} className="text-emerald-500 font-bold">&times;</button>
         </div>
       )}
+
+      {/* TKSR Outreach Inputs */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 p-5 shadow-xs">
+        <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
+          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+            <span>📋</span>
+            <span>TKSR Outreach Inputs</span>
+          </h2>
+          <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-semibold">
+            Authoritative Excel Source
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="bg-slate-50/70 border border-slate-200/60 rounded-xl p-3.5 space-y-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+              Evidence
+            </span>
+            <p className="text-xs text-slate-800 leading-relaxed font-medium whitespace-pre-wrap">
+              {company.evidence && company.evidence.trim() ? (
+                company.evidence
+              ) : (
+                <span className="text-slate-400 italic">Not configured</span>
+              )}
+            </p>
+          </div>
+          <div className="bg-slate-50/70 border border-slate-200/60 rounded-xl p-3.5 space-y-1">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">
+              Recommended Service
+            </span>
+            <p className="text-xs text-slate-800 leading-relaxed font-medium">
+              {company.recommendedService && company.recommendedService.trim() ? (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-700 font-semibold border border-indigo-200/60">
+                  <span>🎯</span>
+                  <span>{company.recommendedService}</span>
+                </span>
+              ) : (
+                <span className="text-slate-400 italic">Not configured</span>
+              )}
+            </p>
+          </div>
+        </div>
+      </div>
 
       {/* Tabs Navigation */}
       <div className="flex border-b border-slate-200 space-x-6">
@@ -1235,8 +1320,15 @@ export default function CompanyDetail() {
                                       <span>{emailMeta.label}</span>
                                     </span>
                                   </div>
-                                  {c.searchStatus === 'SEARCH_TIMEOUT' && (
-                                    <p className="text-[9px] text-amber-700 font-medium">Search query timed out (temporary)</p>
+                                  {(c.emailReason || c.email_reason) && (
+                                    <p className="text-[10px] text-slate-500 font-medium leading-tight max-w-[240px]">
+                                      {c.emailReason || c.email_reason}
+                                    </p>
+                                  )}
+                                  {(emailStatusKey === 'SEARCH_TIMEOUT' || emailStatusKey === 'SEARCH_UNAVAILABLE') && (
+                                    <span className="inline-block text-[9px] bg-indigo-50 text-indigo-700 font-bold px-1.5 py-0.5 rounded border border-indigo-200">
+                                      Retry Available
+                                    </span>
                                   )}
                                 </div>
                               )}
@@ -1770,6 +1862,71 @@ export default function CompanyDetail() {
       {/* TAB 4: AI OUTREACH & EMAIL COMPOSER */}
       {activeTab === 'outreach' && (
         <div className="space-y-6">
+          {/* Authoritative Inputs Card (Phase 2 - Section 16) */}
+          <div className="bg-slate-50 border border-slate-200/90 rounded-2xl p-5 shadow-xs space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200/70 pb-2.5">
+              <div className="flex items-center gap-2">
+                <span className="text-base">📋</span>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">Authoritative Outreach Inputs</h3>
+              </div>
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200/60 self-start sm:self-auto">
+                Authoritative Excel Source
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-white p-3 rounded-xl border border-slate-200/60">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Company</span>
+                <p className="text-xs font-bold text-slate-900 mt-0.5 truncate">{company.companyName}</p>
+                <p className="text-[11px] text-slate-500 font-mono truncate">{company.website}</p>
+              </div>
+
+              <div className="bg-white p-3 rounded-xl border border-slate-200/60">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Decision Maker</span>
+                {(() => {
+                  const lead = contacts.find(c => c._id === selectedContactId) || contacts[0];
+                  return (
+                    <div>
+                      <p className="text-xs font-bold text-slate-900 mt-0.5 truncate">
+                        {lead?.name || company.contactName || 'Leadership Team'}
+                      </p>
+                      <p className="text-[11px] text-slate-500 truncate">
+                        {lead?.designation || lead?.title || 'Executive Leadership'}
+                      </p>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              <div className="bg-white p-3 rounded-xl border border-slate-200/60">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Evidence</span>
+                <p className="text-xs text-slate-800 mt-0.5 font-medium line-clamp-3 whitespace-pre-wrap" title={company.evidence}>
+                  {company.evidence && company.evidence.trim() ? (
+                    company.evidence
+                  ) : (
+                    <span className="text-red-500 font-semibold italic">Missing Evidence — required for outreach</span>
+                  )}
+                </p>
+              </div>
+
+              <div className="bg-white p-3 rounded-xl border border-slate-200/60">
+                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Recommended Service</span>
+                <div className="mt-0.5">
+                  {company.recommendedService && company.recommendedService.trim() ? (
+                    <span className="inline-block text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200/80 px-2 py-0.5 rounded-lg">
+                      {company.recommendedService}
+                    </span>
+                  ) : (
+                    <span className="text-red-500 font-semibold italic text-xs">Missing Service — required for outreach</span>
+                  )}
+                  <p className="text-[10px] text-slate-400 mt-1 italic">
+                    Authoritative from company outreach input
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Generation Configuration Bar */}
           <div className="bg-white rounded-2xl border border-slate-200/80 p-6 shadow-xs space-y-4">
             <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">

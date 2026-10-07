@@ -227,8 +227,9 @@ export default function ExcelImport() {
                     <th className="px-4 py-3">Status</th>
                     <th className="px-4 py-3">Company Name</th>
                     <th className="px-4 py-3">Website</th>
-                    <th className="px-4 py-3">Industry</th>
-                    <th className="px-4 py-3">Contact</th>
+                    <th className="px-4 py-3">Evidence</th>
+                    <th className="px-4 py-3">Recommended Service</th>
+                    <th className="px-4 py-3">Validation / Errors</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -240,10 +241,29 @@ export default function ExcelImport() {
                           {STATUS_LABELS[r.status] || r.status}
                         </span>
                       </td>
-                      <td className="px-4 py-3 font-bold text-slate-900">{r.data?.companyName || '—'}</td>
-                      <td className="px-4 py-3 text-indigo-600 font-mono text-[11px] truncate max-w-xs">{r.data?.website || '—'}</td>
-                      <td className="px-4 py-3 text-slate-600">{r.data?.industry || '—'}</td>
-                      <td className="px-4 py-3 text-slate-500 text-[11px]">{r.data?.contactEmail || r.data?.contactName || '—'}</td>
+                      <td className="px-4 py-3 font-bold text-slate-900">{r.companyName || r.data?.companyName || '—'}</td>
+                      <td className="px-4 py-3 text-indigo-600 font-mono text-[11px] truncate max-w-xs">{r.website || r.data?.website || '—'}</td>
+                      <td className="px-4 py-3 text-slate-700 text-[11px] max-w-xs truncate" title={r.evidence || r.data?.evidence}>
+                        {r.evidence || r.data?.evidence || <span className="text-slate-400 italic">None</span>}
+                      </td>
+                      <td className="px-4 py-3 text-slate-700 text-[11px]">
+                        {r.recommendedService || r.data?.recommendedService ? (
+                          <span className="inline-block bg-slate-100 px-2 py-0.5 rounded text-[10px] font-medium text-slate-800">
+                            {r.recommendedService || r.data?.recommendedService}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400 italic">None</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-slate-500 text-[11px]">
+                        {r.validationErrors && r.validationErrors.length > 0 ? (
+                          <span className="text-red-600 font-medium">
+                            {r.validationErrors.join(', ')}
+                          </span>
+                        ) : (
+                          <span className="text-emerald-600 font-medium">Pass</span>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

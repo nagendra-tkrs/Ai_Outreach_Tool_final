@@ -1,7 +1,7 @@
 import os
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, HTTPException
 from app.config.database import get_database
-from app.services.email_service import send_test_email
+from app.services.email_service import send_test_email, is_masked_secret
 
 router = APIRouter()
 
@@ -28,6 +28,7 @@ async def get_settings():
     sender_profile = setting.get("senderProfile") or {}
 
     ollama_env = os.getenv("OLLAMA_BASE_URL") or "http://localhost:11434"
+    raw_pass = smtp.get("pass") or smtp.get("pass_") or ""
 
     safe_setting = {
         "ai": {
@@ -40,8 +41,8 @@ async def get_settings():
             "port": smtp.get("port") or 587,
             "secure": bool(smtp.get("secure", False)),
             "user": smtp.get("user") or "",
-            "pass": mask_secret(smtp.get("pass") or ""),
-            "hasPass": bool(smtp.get("pass")),
+            "pass": mask_secret(raw_pass),
+            "hasPass": bool(raw_pass),
             "fromName": smtp.get("fromName") or "AI Outreach",
             "fromEmail": smtp.get("fromEmail") or "",
         },
@@ -78,12 +79,15 @@ async def update_settings(payload: dict = Body(...)):
         if ai.get("ollamaBaseUrl"):
             setting["ai"]["ollamaBaseUrl"] = str(ai["ollamaBaseUrl"]).strip()
 
-
     if smtp:
         if "host" in smtp:
             setting["smtp"]["host"] = str(smtp["host"]).strip()
         if "port" in smtp:
-            setting["smtp"]["port"] = int(smtp["port"])
+            port_val = int(smtp["port"])
+            setting["smtp"]["port"] = port_val
+            # Auto-align secure flag if port 465 and secure not explicitly passed
+            if port_val == 465 and "secure" not in smtp:
+                setting["smtp"]["secure"] = True
         if "secure" in smtp:
             setting["smtp"]["secure"] = bool(smtp["secure"])
         if "user" in smtp:
@@ -92,8 +96,16 @@ async def update_settings(payload: dict = Body(...)):
             setting["smtp"]["fromName"] = str(smtp["fromName"]).strip()
         if "fromEmail" in smtp:
             setting["smtp"]["fromEmail"] = str(smtp["fromEmail"]).strip()
-        if smtp.get("pass") and "..." not in smtp["pass"]:
-            setting["smtp"]["pass"] = smtp["pass"]
+        
+        # Password preservation logic:
+        # - If incoming smtp.pass is empty -> preserve existing DB password.
+        # - If incoming smtp.pass is masked -> preserve existing DB password.
+        # - If incoming smtp.pass is a new real password -> update the DB password.
+        # - NEVER save ******** or abcd...1234 as the actual SMTP password.
+        if "pass" in smtp:
+            raw_pass = str(smtp["pass"]).strip() if smtp["pass"] is not None else ""
+            if raw_pass and not is_masked_secret(raw_pass):
+                setting["smtp"]["pass"] = raw_pass
 
     if sender_profile:
         setting["senderProfile"] = {**setting["senderProfile"], **sender_profile}
@@ -111,14 +123,17 @@ async def update_settings(payload: dict = Body(...)):
 async def test_smtp(payload: dict = Body(...)):
     smtp = payload.get("smtp")
     recipient_email = payload.get("recipientEmail")
-    result = await send_test_email(smtp, recipient_email)
+    if not recipient_email or not str(recipient_email).strip():
+        raise HTTPException(status_code=400, detail="Recipient email is required for test email.")
+    result = await send_test_email(smtp, recipient_email.strip())
     msg = (
-        "Test email generated using Ethereal sandbox (view preview link)"
+        "Test email generated using development sandbox"
         if result.get("isTest")
-        else f"Test email dispatched to {recipient_email}"
+        else f"Test email dispatched to {recipient_email.strip()}"
     )
     return {
         "success": True,
         "message": msg,
         "data": result,
     }
+

@@ -1,7 +1,21 @@
 import re
 from urllib.parse import urlparse
 
-REQUIRED_COLUMNS = ['Company Name', 'Website']
+REQUIRED_COLUMNS = [
+    'Company Name',
+    'Website',
+    'Evidence',
+    'Recommended Service'
+]
+
+VALID_RECOMMENDED_SERVICES = {
+    'AI Strategy Consulting',
+    'AI Readiness and Opportunity Assessments',
+    'AI & Automation Workshops',
+    'AI Training',
+    'AI Governance and Responsible AI',
+    'AI Data Strategy'
+}
 
 OPTIONAL_COLUMNS = [
     'Industry',
@@ -57,6 +71,8 @@ def validate_row(row: dict) -> list[str]:
     errors = []
     company_name = (row.get('companyName') or '').strip()
     website = (row.get('website') or '').strip()
+    evidence = (row.get('evidence') or '').strip()
+    recommended_service = (row.get('recommendedService') or '').strip()
 
     if not company_name:
         errors.append('Company Name is required')
@@ -64,4 +80,15 @@ def validate_row(row: dict) -> list[str]:
         errors.append('Website is required')
     elif not is_valid_url(website):
         errors.append('Invalid website URL')
+
+    if not evidence:
+        errors.append('Evidence is required')
+
+    if not recommended_service:
+        errors.append('Recommended Service is required')
+    elif recommended_service not in VALID_RECOMMENDED_SERVICES:
+        errors.append(
+            f"Invalid Recommended Service: '{recommended_service}'. Must be one of: {', '.join(sorted(VALID_RECOMMENDED_SERVICES))}"
+        )
+
     return errors

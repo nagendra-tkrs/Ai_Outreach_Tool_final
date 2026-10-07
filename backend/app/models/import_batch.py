@@ -6,6 +6,8 @@ class ImportBatchRow(BaseModel):
     companyName: Optional[str] = ""
     website: Optional[str] = ""
     normalizedWebsite: Optional[str] = ""
+    evidence: Optional[str] = ""
+    recommendedService: Optional[str] = ""
     industry: Optional[str] = ""
     country: Optional[str] = ""
     contactName: Optional[str] = ""

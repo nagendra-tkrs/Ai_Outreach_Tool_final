@@ -205,10 +205,9 @@ async def test_excel_import_and_company_listing(client):
     # Create in-memory excel workbook
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Companies"
-    ws.append(["Company Name", "Website", "Industry", "Country"])
-    ws.append(["Acme Robotics", "https://acmerobotics.com", "Robotics", "USA"])
-    ws.append(["Nova Health", "https://novahealth.co.uk", "Healthcare", "UK"])
+    ws.append(["Company Name", "Website", "Evidence", "Recommended Service", "Industry", "Country"])
+    ws.append(["Acme Robotics", "https://acmerobotics.com", "Expanding robotic supply chain operations.", "AI & Automation Workshops", "Robotics", "USA"])
+    ws.append(["Nova Health", "https://novahealth.co.uk", "Deploying healthcare intelligence models.", "AI Strategy Consulting", "Healthcare", "UK"])
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -255,6 +254,8 @@ async def test_outreach_endpoints(client):
         "companyName": "OutreachTech",
         "website": "https://outreachtech.com",
         "normalizedWebsite": "outreachtech.com",
+        "evidence": "OutreachTech is deploying automated sales pipelines.",
+        "recommendedService": "AI Strategy Consulting",
         "createdAt": now,
         "updatedAt": now,
     })

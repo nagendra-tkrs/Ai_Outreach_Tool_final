@@ -13,6 +13,8 @@ class OutreachMessage(BaseModel):
     angle: Optional[str] = "pain_point"
     tone: Optional[str] = "conversational"
     focusService: Optional[str] = "AI Strategy Consulting"
+    evidenceUsed: Optional[str] = ""
+    recommendedServiceUsed: Optional[str] = ""
     status: Optional[str] = "draft"  # draft, approved, scheduled, sending, sent, failed
     isManuallyEdited: Optional[bool] = False
     scheduledAt: Optional[datetime] = None

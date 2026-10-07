@@ -386,6 +386,11 @@ BAD_NAME_WORDS = {
     "committee", "council", "committee:", "board:", "team:", "leadership:",
     "overview", "history", "mission", "vision", "values", "governance",
     "advisory", "partners", "partnership", "services", "solutions",
+    # Transportation, Logistics & Operational terms that appear in navigation/services
+    "freight", "mile", "fleet", "carrier", "carriers", "truck", "trucking",
+    "driver", "drivers", "driving", "transport", "transportation", "dedicated",
+    "intermodal", "logistics", "shipping", "school", "schools", "roadmaster",
+    "warehouse", "warehousing", "supply", "chain", "distribution",
 }
 
 HISTORICAL_MARKERS = [
@@ -1948,6 +1953,40 @@ def search_ddg_exact_person_email(person_name, company_name, domain, allowed_dom
                         "search_attempts": attempts,
                         "sources_checked": sources_checked,
                     }
+
+            # TARGET PAGE CRAWLING: if email is not found directly in snippet text, crawl the target webpage!
+            if href and href.startswith("http") and not href.lower().endswith((".pdf", ".docx", ".xlsx", ".zip", ".png", ".jpg", ".jpeg")):
+                try:
+                    from app.services.email_extraction_service import extract_emails_from_html
+                    with httpx.Client(verify=False, timeout=4.0, follow_redirects=True, headers=HEADERS) as client:
+                        resp = client.get(href)
+                        if resp.status_code == 200 and "text/html" in resp.headers.get("content-type", "").lower():
+                            extracted_items = extract_emails_from_html(resp.text, base_url=href)
+                            for rec in extracted_items:
+                                em = rec.get("email", "")
+                                if is_generic_email(em) or is_free_email(em):
+                                    continue
+                                em_dom = email_domain(em)
+                                is_ok, reason = is_valid_company_email_domain(em, clean_domain, company_name, domains_to_check)
+                                if not is_ok:
+                                    continue
+                                if email_matches_person(em, person_name):
+                                    norm_em = normalize_email(em)
+                                    print(f"[EMAIL] Discovered on target webpage ({href}): {norm_em}")
+                                    return {
+                                        "email": norm_em,
+                                        "status": "EXACT_FOUND",
+                                        "search_status": "COMPLETED",
+                                        "source_url": href,
+                                        "source_type": "PUBLIC_SEARCH",
+                                        "evidence": f"Found on public page ({href}): {norm_em} ({rec.get('context', '')[:120]})",
+                                        "verification": "PUBLIC_EVIDENCE",
+                                        "domain": em_dom or clean_domain,
+                                        "search_attempts": attempts,
+                                        "sources_checked": sources_checked,
+                                    }
+                except Exception as crawl_err:
+                    print(f"[TARGET CRAWL] Failed crawling {href}: {crawl_err}")
 
     if any_timeout and not any_success:
         print(f"[SEARCH] DDG timeout/failure for all attempted queries")

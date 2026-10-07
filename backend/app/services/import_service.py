@@ -40,6 +40,8 @@ async def confirm_import(batch_id: str):
             "companyName": row["companyName"],
             "website": row["website"],
             "normalizedWebsite": row["normalizedWebsite"],
+            "evidence": row.get("evidence", ""),
+            "recommendedService": row.get("recommendedService", ""),
             "industry": row.get("industry", ""),
             "country": row.get("country", ""),
             "contactName": row.get("contactName", ""),

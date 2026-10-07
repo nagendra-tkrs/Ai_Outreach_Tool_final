@@ -198,8 +198,12 @@ def generate_fallback_outreach(company: dict, research: dict, contact: dict, sen
     sender_title = sender.get('senderTitle') or 'Business Analyst'
     my_company = sender.get('companyName') or 'TKSR Product Services'
 
-    selected_service = focus_service
-    if not selected_service:
+    company_rec = (company.get('recommendedService') or '').strip()
+    if company_rec:
+        selected_service = company_rec
+    elif focus_service:
+        selected_service = focus_service
+    else:
         role_cat = contact.get('roleCategory') if contact else ''
         if role_cat in ('cto', 'cio'):
             selected_service = 'AI Data Strategy'
@@ -249,9 +253,27 @@ def generate_fallback_outreach(company: dict, research: dict, contact: dict, sen
         }
     }
 
-    service = service_details.get(selected_service, service_details['AI Strategy Consulting'])
-    icebreakers = research.get('icebreakers') if research else []
-    icebreaker = icebreakers[0] if icebreakers else f"I came across {company_name}'s work in {company.get('industry') or 'your sector'} and was impressed by your team's execution."
+    service = service_details.get(
+        selected_service,
+        {
+            'serviceName': selected_service,
+            'painPoint': f"advancing initiatives in {selected_service}",
+            'solution': f"At {my_company}, our structured {selected_service} practice helps teams solve operational friction and achieve measurable outcomes.",
+            'actionPrompt': f"explore opportunities in {selected_service}"
+        }
+    )
+
+    company_evidence = (company.get('evidence') or '').strip()
+    if company_evidence:
+        evidence_clean = company_evidence.rstrip('.')
+        icebreaker = f"Your recent initiative around {evidence_clean} caught our attention at {my_company}."
+        f2_evidence_ref = f"Following up on my note regarding {evidence_clean} and how it connects with {service['serviceName']} for {company_name}."
+        f3_evidence_ref = f"I know schedules are demanding. As you continue your work around {evidence_clean}, I wanted to send one final note regarding {service['serviceName']}."
+    else:
+        icebreakers = research.get('icebreakers') if research else []
+        icebreaker = icebreakers[0] if icebreakers else f"I came across {company_name}'s work in {company.get('industry') or 'your sector'} and was impressed by your team's execution."
+        f2_evidence_ref = f"Following up on my note earlier this week regarding {service['serviceName']} for {company_name}."
+        f3_evidence_ref = f"I know schedules can be hectic, so I wanted to send one final note regarding {service['serviceName']}."
 
     linkedin_note = (
         f"Hi {company_name} Team, saw your work in {company.get('industry') or 'tech'} and wanted to connect regarding how TKSR Product Services helps companies accelerate {service['serviceName']}."
@@ -265,10 +287,12 @@ def generate_fallback_outreach(company: dict, research: dict, contact: dict, sen
         {
             'step': 1,
             'stepLabel': 'Initial Outreach',
-            'subject': f"Accelerating AI & Automation at {company_name}",
+            'subject': f"Accelerating {service['serviceName']} at {company_name}",
             'angle': angle or 'pain_point',
             'tone': tone or 'conversational',
             'focusService': selected_service,
+            'evidenceUsed': company_evidence,
+            'recommendedServiceUsed': selected_service,
             'delayDays': 0,
             'recipientEmail': contact.get('email') if contact else '',
             'recipientName': contact_name,
@@ -280,30 +304,34 @@ def generate_fallback_outreach(company: dict, research: dict, contact: dict, sen
         {
             'step': 2,
             'stepLabel': 'Follow-up: Practical Implementation',
-            'subject': f"Re: Accelerating AI & Automation at {company_name}",
+            'subject': f"Re: Accelerating {service['serviceName']} at {company_name}",
             'angle': 'value_prop',
             'tone': tone or 'conversational',
             'focusService': selected_service,
+            'evidenceUsed': company_evidence,
+            'recommendedServiceUsed': selected_service,
             'delayDays': 3,
             'recipientEmail': contact.get('email') if contact else '',
             'recipientName': contact_name,
-            'bodyHtml': f"<p>{contact_greeting},</p>\n<p>Following up on my note earlier this week regarding <strong>{service['serviceName']}</strong> for {company_name}.</p>\n<p>Organizations in your space frequently encounter challenges when moving from initial AI experimentation to robust production workflows. Our focused approach helps teams eliminate operational bottlenecks and achieve rapid, quantifiable ROI.</p>\n<p>Do you have 10 minutes on Thursday or Friday to connect briefly?</p>\n<p>Best regards,<br/><strong>{sender_name}</strong><br/>{sender_title} | {my_company}</p>",
-            'bodyText': f"{contact_greeting},\n\nFollowing up on my note earlier this week regarding {service['serviceName']} for {company_name}.\n\nOrganizations in your space frequently encounter challenges when moving from initial AI experimentation to robust production workflows. Our focused approach helps teams eliminate operational bottlenecks and achieve rapid, quantifiable ROI.\n\nDo you have 10 minutes on Thursday or Friday to connect briefly?\n\nBest regards,\n{sender_name}\n{sender_title} | {my_company}",
+            'bodyHtml': f"<p>{contact_greeting},</p>\n<p>{f2_evidence_ref}</p>\n<p>Organizations in your space frequently encounter challenges when moving from initial exploration to robust production workflows. Our focused approach helps teams eliminate operational bottlenecks and achieve rapid, quantifiable ROI with <strong>{service['serviceName']}</strong>.</p>\n<p>Do you have 10 minutes on Thursday or Friday to connect briefly?</p>\n<p>Best regards,<br/><strong>{sender_name}</strong><br/>{sender_title} | {my_company}</p>",
+            'bodyText': f"{contact_greeting},\n\n{f2_evidence_ref}\n\nOrganizations in your space frequently encounter challenges when moving from initial exploration to robust production workflows. Our focused approach helps teams eliminate operational bottlenecks and achieve rapid, quantifiable ROI with {service['serviceName']}.\n\nDo you have 10 minutes on Thursday or Friday to connect briefly?\n\nBest regards,\n{sender_name}\n{sender_title} | {my_company}",
             'linkedinNote': linkedin_note,
             'linkedinInmail': linkedin_inmail
         },
         {
             'step': 3,
             'stepLabel': 'Break-up / Low-Friction Invitation',
-            'subject': f"Closing the loop: AI Strategy for {company_name}",
+            'subject': f"Closing the loop: {service['serviceName']} for {company_name}",
             'angle': 'icebreaker',
             'tone': tone or 'conversational',
             'focusService': selected_service,
+            'evidenceUsed': company_evidence,
+            'recommendedServiceUsed': selected_service,
             'delayDays': 6,
             'recipientEmail': contact.get('email') if contact else '',
             'recipientName': contact_name,
-            'bodyHtml': f"<p>{contact_greeting},</p>\n<p>I know schedules can be hectic, so I wanted to send one final note.</p>\n<p>If you're currently evaluating AI roadmaps or workflow automations at <strong>{company_name}</strong>, we'd be delighted to share a tailored <strong>{service['serviceName']}</strong> briefing whenever the timing is right.</p>\n<p>If now isn't the best time, feel free to keep us in mind for future initiatives.</p>\n<p>Best regards,<br/><strong>{sender_name}</strong><br/>{sender_title} | {my_company}</p>",
-            'bodyText': f"{contact_greeting},\n\nI know schedules can be hectic, so I wanted to send one final note.\n\nIf you're currently evaluating AI roadmaps or workflow automations at {company_name}, we'd be delighted to share a tailored {service['serviceName']} briefing whenever the timing is right.\n\nIf now isn't the best time, feel free to keep us in mind for future initiatives.\n\nBest regards,\n{sender_name}\n{sender_title} | {my_company}",
+            'bodyHtml': f"<p>{contact_greeting},</p>\n<p>{f3_evidence_ref}</p>\n<p>If you're currently evaluating initiatives at <strong>{company_name}</strong>, we'd be delighted to share a tailored <strong>{service['serviceName']}</strong> briefing whenever the timing is right.</p>\n<p>If now isn't the best time, feel free to keep us in mind for future initiatives.</p>\n<p>Best regards,<br/><strong>{sender_name}</strong><br/>{sender_title} | {my_company}</p>",
+            'bodyText': f"{contact_greeting},\n\n{f3_evidence_ref}\n\nIf you're currently evaluating initiatives at {company_name}, we'd be delighted to share a tailored {service['serviceName']} briefing whenever the timing is right.\n\nIf now isn't the best time, feel free to keep us in mind for future initiatives.\n\nBest regards,\n{sender_name}\n{sender_title} | {my_company}",
             'linkedinNote': linkedin_note,
             'linkedinInmail': linkedin_inmail
         }

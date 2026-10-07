@@ -599,7 +599,7 @@ async def extract_contacts_from_website(company_id: str, return_diagnostics: boo
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
 
-    company_name = company.get('companyName') or ''
+    company_name = company.get('companyName') or company.get('name') or ''
     raw_website = company.get('website') or company.get('officialDomain') or company.get('normalizedWebsite') or ''
     clean_domain = re.sub(r'^https?://', '', raw_website, flags=re.I)
     clean_domain = re.sub(r'^www\.', '', clean_domain, flags=re.I).split('/')[0].strip().lower()
@@ -780,15 +780,33 @@ async def extract_contacts_from_website(company_id: str, return_diagnostics: boo
             gen_pattern = c.get('generated_pattern') or c.get('generatedPattern') or c.get('email_pattern') or 'first.last'
         else:
             final_email = None
-            email_status = 'NOT_FOUND'
+            cand_status = c.get('email_status') or c.get('emailStatus')
+            if cand_status in ('SEARCH_TIMEOUT', 'SEARCH_UNAVAILABLE', 'DOMAIN_BLOCKED', 'NEEDS_REVIEW', 'PATTERN_INFERRED'):
+                email_status = cand_status
+            else:
+                email_status = 'NOT_FOUND'
             status = 'not_found'
             is_exact = False
             mailbox_verification = 'UNVERIFIED'
             verification_method = 'NONE'
-            conf_score = 50
+            conf_score = 0
             gen_pattern = 'none'
 
         pat_conf = c.get('pattern_confidence') or c.get('patternConfidence') or 'none'
+        email_reason = c.get('email_reason') or c.get('emailReason') or (
+            'Verified in public source' if email_status == 'EXACT_FOUND' else (
+                'Inferred from verified company email pattern' if email_status in ('PATTERN_GENERATED', 'PATTERN_INFERRED') else (
+                    'Search timed out within configured limit' if email_status == 'SEARCH_TIMEOUT' else (
+                        'Public search service rate-limited or unavailable' if email_status == 'SEARCH_UNAVAILABLE' else (
+                            'Target website blocked crawling' if email_status == 'DOMAIN_BLOCKED' else (
+                                'Requires manual review' if email_status == 'NEEDS_REVIEW' else
+                                'Discovery completed but no public email was found'
+                            )
+                        )
+                    )
+                )
+            )
+        )
 
         doc = {
             'companyId': cid,
@@ -804,6 +822,8 @@ async def extract_contacts_from_website(company_id: str, return_diagnostics: boo
             'emailDomain': c.get('email_domain') or clean_domain,
             'emailStatus': email_status,
             'email_status': email_status,
+            'emailReason': email_reason,
+            'email_reason': email_reason,
             'status': status,
             'mailboxVerification': mailbox_verification,
             'emailVerificationMethod': verification_method,

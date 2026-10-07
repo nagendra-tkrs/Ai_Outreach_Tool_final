@@ -12,6 +12,8 @@ from app.config.database import get_db
 FIELD_MAP = {
     'Company Name': 'companyName',
     'Website': 'website',
+    'Evidence': 'evidence',
+    'Recommended Service': 'recommendedService',
     'Industry': 'industry',
     'Country': 'country',
     'Contact Name': 'contactName',
@@ -61,6 +63,8 @@ def normalize_row(raw_row: dict) -> dict:
     normalized['companyName'] = normalize_company_name(normalized.get('companyName', ''))
     normalized['website'] = (normalized.get('website') or '').strip()
     normalized['normalizedWebsite'] = normalize_website(normalized['website'])
+    normalized['evidence'] = (normalized.get('evidence') or '').strip()
+    normalized['recommendedService'] = (normalized.get('recommendedService') or '').strip()
     return normalized
 
 async def process_excel(file_bytes: bytes, original_filename: str) -> dict:

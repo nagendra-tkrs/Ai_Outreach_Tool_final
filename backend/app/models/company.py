@@ -15,6 +15,8 @@ class CompanyBase(BaseModel):
     companyName: str
     website: str
     normalizedWebsite: Optional[str] = None
+    evidence: Optional[str] = ""
+    recommendedService: Optional[str] = ""
     officialDomain: Optional[str] = ""
     legalCompanyName: Optional[str] = ""
     corporateEmailDomain: Optional[str] = ""
