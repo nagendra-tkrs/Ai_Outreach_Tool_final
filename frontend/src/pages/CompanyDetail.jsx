@@ -1,6 +1,19 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../api';
+import { deriveSequenceState, SEQUENCE_STATE_META } from '../utils/outreachStats';
+import {
+  applyLocalEdit,
+  describeRecipientSync,
+  findInvalidEmails,
+  getActiveStepMessage,
+  isLockedMessage,
+  isQuarantined,
+  mergeServerMessages,
+  resolveStepMessage,
+  shouldRefetchAfterSave,
+} from '../utils/outreachEditor';
+import QuarantineReleaseModal from '../components/QuarantineReleaseModal';
 
 const CRAWL_STATUS_STYLES = {
   pending: 'bg-slate-100 text-slate-600',
@@ -185,11 +198,41 @@ export default function CompanyDetail() {
   const [sendResult, setSendResult] = useState(null);
   const [copiedField, setCopiedField] = useState('');
   const [editingMessage, setEditingMessage] = useState(null);
+  const [regeneratingEmail, setRegeneratingEmail] = useState(false);
   const [ccInputText, setCcInputText] = useState('');
   const [bccInputText, setBccInputText] = useState('');
   const [showBccInput, setShowBccInput] = useState(false);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [scheduleConfig, setScheduleConfig] = useState({ step2Days: 3, step3Days: 6 });
+  const [quarantineReleaseTarget, setQuarantineReleaseTarget] = useState(null);
+
+  // Per-step working copies + dirty flags. A single shared `editingMessage`
+  // used to be replaced on every step switch / refetch, silently discarding
+  // unsaved edits. Each step now owns its own working copy.
+  const [draftsByStep, setDraftsByStep] = useState({});
+  const [dirtySteps, setDirtySteps] = useState({});
+  // Refs mirror the latest nav/edit state so async refetches never clobber a
+  // step that has unsaved edits (state updates would otherwise be stale).
+  const draftsByStepRef = useRef({});
+  const dirtyStepsRef = useRef({});
+  const selectedStepRef = useRef(1);
+
+  const setStepDirty = (step, value) => {
+    dirtyStepsRef.current = { ...dirtyStepsRef.current, [step]: value };
+    setDirtySteps(dirtyStepsRef.current);
+  };
+
+  // Single entry point for every local edit so the working copy and dirty flag
+  // stay consistent.
+  const updateEditingMessage = (patch) => {
+    if (!editingMessage) return;
+    const next = applyLocalEdit(editingMessage, patch);
+    const step = editingMessage.step;
+    draftsByStepRef.current = { ...draftsByStepRef.current, [step]: next };
+    setDraftsByStep(draftsByStepRef.current);
+    setStepDirty(step, true);
+    setEditingMessage(next);
+  };
 
   const fetchCompanyData = async () => {
     try {
@@ -262,15 +305,26 @@ export default function CompanyDetail() {
       const list = res.data?.data || res.data || [];
       if (Array.isArray(list)) {
         setOutreachMessages(list);
-        if (list.length > 0) {
-          const current = list.find((m) => m.step === selectedStep) || list[0];
-          setEditingMessage(current);
-          if (current.focusService) {
-            setSelectedFocusService(current.focusService);
-          }
-          if (current.bccRecipients && current.bccRecipients.length > 0) {
-            setShowBccInput(true);
-          }
+        // Refresh per-step drafts, but never overwrite a step with unsaved edits.
+        setDraftsByStep((prev) => {
+          const merged = mergeServerMessages(prev, dirtyStepsRef.current, list);
+          draftsByStepRef.current = merged;
+          return merged;
+        });
+
+        const currentStep = selectedStepRef.current;
+        const savedForStep = list.find((m) => m.step === currentStep);
+        // Only replace the visible editor when the current step is clean.
+        if (savedForStep && !dirtyStepsRef.current[currentStep]) {
+          setEditingMessage(savedForStep);
+        } else if (!dirtyStepsRef.current[currentStep] && draftsByStepRef.current[currentStep]) {
+          setEditingMessage(draftsByStepRef.current[currentStep]);
+        }
+        if (savedForStep?.focusService) {
+          setSelectedFocusService(savedForStep.focusService);
+        }
+        if (savedForStep?.bccRecipients && savedForStep.bccRecipients.length > 0) {
+          setShowBccInput(true);
         }
       }
     } catch (err) {
@@ -281,6 +335,13 @@ export default function CompanyDetail() {
   useEffect(() => {
     const loadAll = async () => {
       setLoading(true);
+      // A new company starts a fresh editor: no cross-company draft bleed.
+      selectedStepRef.current = 1;
+      dirtyStepsRef.current = {};
+      draftsByStepRef.current = {};
+      setSelectedStep(1);
+      setDirtySteps({});
+      setDraftsByStep({});
       await Promise.all([
         fetchCompanyData(),
         fetchCrawl(),
@@ -422,8 +483,7 @@ export default function CompanyDetail() {
     setSelectedContactId(contact._id);
     setActiveTab('outreach');
     if (editingMessage) {
-      setEditingMessage({
-        ...editingMessage,
+      updateEditingMessage({
         recipientEmail: contact.email,
         recipientName: contact.name,
       });
@@ -445,9 +505,16 @@ export default function CompanyDetail() {
       const list = res.data?.data || res.data || [];
       if (Array.isArray(list)) {
         setOutreachMessages(list);
+        const seeded = {};
+        for (const m of list) seeded[m.step] = m;
+        draftsByStepRef.current = seeded;
+        setDraftsByStep(seeded);
+        dirtyStepsRef.current = {};
+        setDirtySteps({});
         const step1 = list.find((m) => m.step === 1) || list[0];
         setEditingMessage(step1);
         setSelectedStep(1);
+        selectedStepRef.current = 1;
       }
       await fetchCompanyData();
       setSuccessMsg(`Generated personalized email focused on ${selectedFocusService}!`);
@@ -460,9 +527,13 @@ export default function CompanyDetail() {
   };
 
   const handleStepSelect = (stepNum) => {
+    if (stepNum === selectedStep) return;
+    selectedStepRef.current = stepNum;
     setSelectedStep(stepNum);
-    const msg = outreachMessages.find((m) => m.step === stepNum);
-    if (msg) setEditingMessage(msg);
+    // Each step keeps its own working copy; unsaved edits are preserved across
+    // navigation instead of being replaced by the last saved server message.
+    const nextMsg = draftsByStepRef.current[stepNum] || resolveStepMessage(draftsByStep, outreachMessages, stepNum);
+    setEditingMessage(nextMsg);
   };
 
   // CC & BCC Helpers
@@ -476,20 +547,14 @@ export default function CompanyDetail() {
     const currentCc = Array.isArray(editingMessage.ccRecipients) ? editingMessage.ccRecipients : [];
     const merged = Array.from(new Set([...currentCc, ...emailsToAdd]));
 
-    setEditingMessage({
-      ...editingMessage,
-      ccRecipients: merged
-    });
+    updateEditingMessage({ ccRecipients: merged });
     setCcInputText('');
   };
 
   const handleRemoveCcEmail = (emailToRemove) => {
     if (!editingMessage) return;
     const currentCc = Array.isArray(editingMessage.ccRecipients) ? editingMessage.ccRecipients : [];
-    setEditingMessage({
-      ...editingMessage,
-      ccRecipients: currentCc.filter(e => e !== emailToRemove)
-    });
+    updateEditingMessage({ ccRecipients: currentCc.filter(e => e !== emailToRemove) });
   };
 
   const handleAddBccEmail = () => {
@@ -502,43 +567,135 @@ export default function CompanyDetail() {
     const currentBcc = Array.isArray(editingMessage.bccRecipients) ? editingMessage.bccRecipients : [];
     const merged = Array.from(new Set([...currentBcc, ...emailsToAdd]));
 
-    setEditingMessage({
-      ...editingMessage,
-      bccRecipients: merged
-    });
+    updateEditingMessage({ bccRecipients: merged });
     setBccInputText('');
   };
 
   const handleRemoveBccEmail = (emailToRemove) => {
     if (!editingMessage) return;
     const currentBcc = Array.isArray(editingMessage.bccRecipients) ? editingMessage.bccRecipients : [];
-    setEditingMessage({
-      ...editingMessage,
-      bccRecipients: currentBcc.filter(e => e !== emailToRemove)
-    });
+    updateEditingMessage({ bccRecipients: currentBcc.filter(e => e !== emailToRemove) });
   };
 
   const handleSaveDraft = async () => {
     if (!editingMessage) return;
     setSavingDraft(true);
+    setError('');
     try {
-      const res = await api.put(`/outreach/${editingMessage._id}`, {
-        subject: editingMessage.subject,
-        bodyHtml: editingMessage.bodyHtml,
-        bodyText: editingMessage.bodyText,
-        recipientEmail: editingMessage.recipientEmail,
-        recipientName: editingMessage.recipientName,
-        ccRecipients: editingMessage.ccRecipients || [],
-        bccRecipients: editingMessage.bccRecipients || [],
-        focusService: selectedFocusService,
-        linkedinNote: editingMessage.linkedinNote,
-        linkedinInmail: editingMessage.linkedinInmail,
+      const isSent = isLockedMessage(editingMessage);
+      // Manual-edit save: block malformed To/CC/BCC client-side with one clear
+      // message before any request is made. The backend re-validates
+      // quarantined drafts and answers 400 (surfaced via the api interceptor).
+      if (!isSent) {
+        const invalidEmails = findInvalidEmails({
+          recipientEmail: editingMessage.recipientEmail,
+          ccRecipients: editingMessage.ccRecipients,
+          bccRecipients: editingMessage.bccRecipients,
+        });
+        if (invalidEmails.length > 0) {
+          setError(
+            `Cannot save: invalid email address${invalidEmails.length > 1 ? 'es' : ''}: ` +
+            `${invalidEmails.join(', ')}. Correct them (or clear the field) and save again.`
+          );
+          return;
+        }
+      }
+      // Sent messages are immutable history: the UI may only submit a
+      // recipient-only correction. The backend pauses Step 2/3 for manual
+      // review instead of silently redirecting the sequence.
+      const payload = isSent
+        ? { recipientEmail: editingMessage.recipientEmail }
+        : {
+            subject: editingMessage.subject,
+            bodyHtml: editingMessage.bodyHtml,
+            bodyText: editingMessage.bodyText,
+            recipientEmail: editingMessage.recipientEmail,
+            recipientName: editingMessage.recipientName,
+            ccRecipients: editingMessage.ccRecipients || [],
+            bccRecipients: editingMessage.bccRecipients || [],
+            focusService: selectedFocusService,
+            linkedinNote: editingMessage.linkedinNote,
+            linkedinInmail: editingMessage.linkedinInmail,
+          };
+      const res = await api.put(`/outreach/${editingMessage._id}`, payload);
+      // The axios interceptor unwraps the response to its BODY, so the message
+      // is `res.data` and recipientSync lives at the top level (`res.recipientSync`).
+      const updated = res?.data?.data || res?.data || res;
+      const sync = res?.recipientSync ?? res?.data?.recipientSync ?? null;
+      const savedStep = updated?.step ?? editingMessage.step;
+      setStepDirty(savedStep, false);
+
+      setDraftsByStep((d) => {
+        const nextDrafts = { ...d, [savedStep]: updated };
+        if (savedStep === 1 && sync) {
+          for (const stepNum of [2, 3]) {
+            const followUp = nextDrafts[stepNum];
+            if (followUp && !isLockedMessage(followUp) && !isQuarantined(followUp)) {
+              const patch = {};
+              if (sync.updated > 0) {
+                patch.recipientEmail = updated.recipientEmail;
+                if (updated.recipientName) {
+                  patch.recipientName = updated.recipientName;
+                }
+              }
+              if (sync.ccUpdated > 0 && Array.isArray(updated.ccRecipients)) {
+                patch.ccRecipients = updated.ccRecipients;
+              }
+              if (Object.keys(patch).length > 0) {
+                nextDrafts[stepNum] = { ...followUp, ...patch };
+              }
+            }
+          }
+        }
+        draftsByStepRef.current = nextDrafts;
+        return nextDrafts;
       });
-      const updated = res.data?.data || res.data;
-      setOutreachMessages(outreachMessages.map((m) => (m._id === updated._id ? updated : m)));
-      setEditingMessage(updated);
-      setSuccessMsg('Email draft and custom edits saved successfully!');
-      setTimeout(() => setSuccessMsg(''), 3500);
+
+      setOutreachMessages((prev) =>
+        prev.map((m) => {
+          if (m._id === updated._id) return updated;
+          if (savedStep === 1 && (m.step === 2 || m.step === 3) && !isLockedMessage(m) && !isQuarantined(m)) {
+            const patch = {};
+            if (sync?.updated > 0) {
+              patch.recipientEmail = updated.recipientEmail;
+              if (updated.recipientName) patch.recipientName = updated.recipientName;
+            }
+            if (sync?.ccUpdated > 0 && Array.isArray(updated.ccRecipients)) {
+              patch.ccRecipients = updated.ccRecipients;
+            }
+            return Object.keys(patch).length > 0 ? { ...m, ...patch } : m;
+          }
+          return m;
+        })
+      );
+
+      if (selectedStepRef.current === savedStep) {
+        setEditingMessage(updated);
+      } else {
+        const activeMsg = draftsByStepRef.current[selectedStepRef.current] ||
+          resolveStepMessage(draftsByStepRef.current, outreachMessages, selectedStepRef.current);
+        if (activeMsg) {
+          setEditingMessage(activeMsg);
+        }
+      }
+
+      const feedback = describeRecipientSync(sync);
+      if (feedback) {
+        setSuccessMsg(feedback.message);
+      } else {
+        setSuccessMsg('Email draft and custom edits saved successfully!');
+      }
+      setTimeout(() => setSuccessMsg(''), 5000);
+      // The PUT response only echoes Step 1, so a successful recipient/CC sync
+      // (sync.updated > 0 || sync.ccUpdated > 0) leaves Steps 2/3 stale in local
+      // state. Refetch, or the editor keeps showing the pre-sync recipient and
+      // CC. mergeServerMessages protects any step with unsaved edits.
+      if (shouldRefetchAfterSave({ isSent, sync })) {
+        await fetchOutreach();
+      }
+      if (isSent) {
+        await fetchCompanyData();
+      }
     } catch (err) {
       setError(`Failed to save draft: ${err.message}`);
     } finally {
@@ -546,8 +703,45 @@ export default function CompanyDetail() {
     }
   };
 
+  const handleRegenerateEmail = async () => {
+    if (!editingMessage || editingMessage.step !== 1) return;
+    if (editingMessage.status === 'sent') return;
+    setRegeneratingEmail(true);
+    setError('');
+    try {
+      const res = await api.post(`/outreach/${editingMessage._id}/regenerate`, { useAi: false });
+      const updated = res?.data?.data || res?.data || res;
+      const savedStep = updated?.step ?? editingMessage.step;
+      setOutreachMessages((prev) => prev.map((m) => (m._id === updated._id ? updated : m)));
+      setDraftsByStep((d) => {
+        const next = { ...d, [savedStep]: updated };
+        draftsByStepRef.current = next;
+        return next;
+      });
+      setStepDirty(savedStep, false);
+      if (selectedStepRef.current === savedStep) {
+        setEditingMessage(updated);
+      }
+      setSuccessMsg('Step 1 email regenerated from Evidence + Recommended Service. Review before sending.');
+      setTimeout(() => setSuccessMsg(''), 5000);
+    } catch (err) {
+      setError(`Failed to regenerate email: ${err.message}`);
+    } finally {
+      setRegeneratingEmail(false);
+    }
+  };
+
   const handleSendEmail = async () => {
     if (!editingMessage) return;
+    if (isQuarantined(editingMessage)) {
+      setError('This message is quarantined. Review and release it before sending.');
+      return;
+    }
+    // FIX 4: a sent message must never be resent from the UI.
+    if (editingMessage.status === 'sent') {
+      setError('This email has already been sent. Duplicate sends are blocked.');
+      return;
+    }
     setSendingEmail(true);
     setError('');
     setSendResult(null);
@@ -558,6 +752,9 @@ export default function CompanyDetail() {
         bccRecipients: editingMessage.bccRecipients || [],
       });
       setSendResult(res.data);
+      // The message is now terminal (sent): drop its unsaved draft flag so the
+      // canonical, immutable record is what reloads.
+      setStepDirty(editingMessage.step, false);
       await fetchOutreach();
       await fetchCompanyData();
     } catch (err) {
@@ -579,8 +776,8 @@ export default function CompanyDetail() {
       });
       setShowScheduleModal(false);
       await fetchOutreach();
-      setSuccessMsg('Automated multi-step drip schedule activated!');
-      setTimeout(() => setSuccessMsg(''), 4000);
+      setSuccessMsg('Drip schedule activated. Step 1 is approved for manual send; Steps 2 and 3 will auto-send on their configured delays.');
+      setTimeout(() => setSuccessMsg(''), 5000);
     } catch (err) {
       setError(`Failed to schedule sequence: ${err.message}`);
     } finally {
@@ -601,6 +798,11 @@ export default function CompanyDetail() {
   const researchStatus = company.researchStatus || (research ? 'completed' : 'pending');
   const outreachStatus = company.outreachStatus || (outreachMessages.length > 0 ? 'generated' : 'none');
 
+  // FIX 3: derive the real drip state (inactive / approved / active / completed
+  // / stopped after reply) from the message statuses.
+  const sequenceState = deriveSequenceState(outreachMessages);
+  const sequenceMeta = SEQUENCE_STATE_META[sequenceState] || SEQUENCE_STATE_META.inactive;
+
   // Filter contacts by Role Category
   const leadershipContacts = contacts.filter(c => c.roleCategory !== 'general' && c.seniority !== 'general');
   const companyChannels = contacts.filter(c => c.roleCategory === 'general' || c.seniority === 'general');
@@ -615,6 +817,12 @@ export default function CompanyDetail() {
     if (roleFilter === 'general') return c.roleCategory === 'general' || c.seniority === 'general';
     return true;
   });
+
+  // The message the UI should treat as active for the selected step. If the
+  // bound editor message is stale (still pointing at another step), re-resolve
+  // the step's own draft/server message so the sent/locked banner and badges
+  // always reflect the actually-selected step.
+  const activeMessage = getActiveStepMessage(draftsByStep, outreachMessages, selectedStep, editingMessage);
 
   return (
     <div className="space-y-6 animate-fadeIn">
@@ -2080,8 +2288,11 @@ export default function CompanyDetail() {
                 <div className="flex border-b border-slate-200 bg-slate-50/80 px-6 pt-3 space-x-4">
                   {[1, 2, 3].map((stepNum) => {
                     const stepMsg = outreachMessages.find((m) => m.step === stepNum);
-                    const isSent = stepMsg?.status === 'sent';
+                    const isSent = isLockedMessage(stepMsg);
                     const isScheduled = stepMsg?.status === 'scheduled';
+                    const isApproved = stepMsg?.status === 'approved';
+                    const isCancelled = Boolean(stepMsg?.cancelledReason);
+                    const needsReview = Boolean(stepMsg?.requiresReview);
                     return (
                       <button
                         key={stepNum}
@@ -2093,13 +2304,31 @@ export default function CompanyDetail() {
                         }`}
                       >
                         <span>Step {stepNum}</span>
-                        {isSent ? (
+                        {dirtySteps[stepNum] && (
+                          <span
+                            className="w-1.5 h-1.5 rounded-full bg-amber-500"
+                            title="Unsaved changes on this step"
+                          />
+                        )}
+                        {needsReview ? (
+                          <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-bold">
+                            NEEDS REVIEW
+                          </span>
+                        ) : isSent ? (
                           <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-bold">
                             SENT {stepMsg.openCount > 0 && `(👁️ ${stepMsg.openCount})`}
+                          </span>
+                        ) : isCancelled ? (
+                          <span className="text-[10px] bg-rose-100 text-rose-700 px-1.5 py-0.5 rounded font-bold">
+                            CANCELLED
                           </span>
                         ) : isScheduled ? (
                           <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded font-bold">
                             SCHEDULED (+{stepMsg.delayDays}d)
+                          </span>
+                        ) : isApproved ? (
+                          <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-bold">
+                            APPROVED (MANUAL)
                           </span>
                         ) : (
                           <span className="text-[10px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded">DRAFT</span>
@@ -2111,6 +2340,13 @@ export default function CompanyDetail() {
 
                 {/* Email Composer Form */}
                 <div className="p-6 space-y-4">
+                  {isLockedMessage(activeMessage) && (
+                    <div className="p-3 rounded-2xl border border-amber-200 bg-amber-50 text-[11px] text-amber-800 leading-relaxed">
+                      <strong>Sent message — history preserved.</strong> Subject, body, CC and BCC are locked.
+                      You may correct the recipient only; changing it pauses Steps 2/3 for manual review instead
+                      of silently redirecting follow-ups.
+                    </div>
+                  )}
                   {/* To: Recipient Email */}
                   <div>
                     <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1">
@@ -2119,7 +2355,7 @@ export default function CompanyDetail() {
                     <input
                       type="email"
                       value={editingMessage.recipientEmail || ''}
-                      onChange={(e) => setEditingMessage({ ...editingMessage, recipientEmail: e.target.value })}
+                      onChange={(e) => updateEditingMessage({ recipientEmail: e.target.value })}
                       placeholder="e.g. prospect@company.com"
                       className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-xs font-mono font-semibold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                     />
@@ -2249,7 +2485,7 @@ export default function CompanyDetail() {
                     <input
                       type="text"
                       value={editingMessage.subject || ''}
-                      onChange={(e) => setEditingMessage({ ...editingMessage, subject: e.target.value })}
+                      onChange={(e) => updateEditingMessage({ subject: e.target.value })}
                       className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl text-xs font-bold focus:ring-2 focus:ring-indigo-500 focus:outline-none"
                     />
                   </div>
@@ -2265,7 +2501,7 @@ export default function CompanyDetail() {
                     <textarea
                       rows={8}
                       value={editingMessage.bodyHtml || ''}
-                      onChange={(e) => setEditingMessage({ ...editingMessage, bodyHtml: e.target.value, isManuallyEdited: true })}
+                      onChange={(e) => updateEditingMessage({ bodyHtml: e.target.value })}
                       className="w-full font-mono text-xs p-3.5 border border-slate-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:outline-none leading-relaxed"
                     />
                   </div>
@@ -2283,18 +2519,53 @@ export default function CompanyDetail() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-slate-500">Status:</span>
                       <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                        editingMessage.status === 'sent' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-700'
+                        isLockedMessage(editingMessage) ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-700'
                       }`}>
                         {editingMessage.status}
                       </span>
+                      {(editingMessage.quarantined === true || isQuarantined(editingMessage)) && (
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="text-[10px] bg-rose-50 text-rose-700 font-bold px-2 py-0.5 rounded-full border border-rose-200"
+                            title="This draft is quarantined (pre-deployment safety review). You can edit and save it freely; sending and scheduling are blocked server-side."
+                          >
+                            🔒 Quarantined — editing allowed, sending blocked
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setQuarantineReleaseTarget(editingMessage)}
+                            className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-300 rounded-lg text-[10px] font-bold transition-colors shadow-2xs flex items-center gap-1 cursor-pointer"
+                            title="Open authenticated modal to release this specific draft from quarantine"
+                          >
+                            <span>🔓</span>
+                            <span>Release Quarantine</span>
+                          </button>
+                        </div>
+                      )}
                       {editingMessage.isManuallyEdited && (
                         <span className="text-[10px] bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded-full border border-blue-200">
                           ✏️ Custom Edited
                         </span>
                       )}
+                      {dirtySteps[editingMessage.step] && (
+                        <span className="text-[10px] bg-amber-50 text-amber-700 font-bold px-2 py-0.5 rounded-full border border-amber-200">
+                          ● Unsaved changes — click Save Draft
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-3">
+                      {editingMessage.step === 1 && editingMessage.status !== 'sent' && (
+                        <button
+                          type="button"
+                          onClick={handleRegenerateEmail}
+                          disabled={regeneratingEmail}
+                          className="px-4 py-2 border border-indigo-200 text-indigo-700 rounded-xl text-xs font-bold hover:bg-indigo-50 transition-colors shadow-xs"
+                          title="Regenerate Step 1 from the company's Evidence + Recommended Service (replaces manual edits — review before using)"
+                        >
+                          {regeneratingEmail ? 'Regenerating...' : '♻️ Regenerate Step 1'}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={handleSaveDraft}
@@ -2303,15 +2574,31 @@ export default function CompanyDetail() {
                       >
                         {savingDraft ? 'Saving...' : '💾 Save Draft'}
                       </button>
-                      <button
-                        type="button"
-                        onClick={handleSendEmail}
-                        disabled={sendingEmail || !editingMessage.recipientEmail}
-                        className="px-6 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl text-xs font-bold hover:from-emerald-700 hover:to-teal-700 transition-colors shadow-md disabled:opacity-50 flex items-center gap-2"
-                      >
-                        <span>🚀</span>
-                        <span>{sendingEmail ? 'Dispatching...' : editingMessage.status === 'sent' ? 'Resend Email (with CC/BCC)' : 'Send Email Now (with CC/BCC)'}</span>
-                      </button>
+                      {isLockedMessage(editingMessage) ? (
+                        <span
+                          className="px-6 py-2 rounded-xl text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200"
+                          title="Already sent — duplicate sends are blocked"
+                        >
+                          ✓ Sent (duplicate sends blocked)
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleSendEmail}
+                          disabled={sendingEmail || !editingMessage.recipientEmail || isQuarantined(editingMessage)}
+                          className="px-6 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl text-xs font-bold hover:from-emerald-700 hover:to-teal-700 transition-colors shadow-md disabled:opacity-50 flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+                          title={
+                            isQuarantined(editingMessage)
+                              ? 'This message is quarantined. Review and release it before sending.'
+                              : !editingMessage.recipientEmail
+                              ? 'Recipient email is required to send'
+                              : 'Send Email Now (with CC/BCC)'
+                          }
+                        >
+                          <span>🚀</span>
+                          <span>{sendingEmail ? 'Dispatching...' : 'Send Email Now (with CC/BCC)'}</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2397,22 +2684,31 @@ export default function CompanyDetail() {
             </div>
 
             <p className="text-xs text-slate-600 leading-relaxed">
-              Activate automated drip timing for this company. Step 1 sends immediately, followed automatically by Step 2 and Step 3 on your configured schedule.
+              Activating the drip schedule arms the follow-up emails. <strong>Step 1 is approved for manual
+              sending only — it is never sent automatically.</strong> Steps 2 and 3 are sent automatically
+              only while the drip schedule is active and only after Step 1 has been sent.
             </p>
+
+            <div className="flex items-center justify-between p-2.5 rounded-xl border bg-slate-50 animate-fadeIn">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Sequence status</span>
+              <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${sequenceMeta.className}`}>
+                {sequenceMeta.label}
+              </span>
+            </div>
 
             <div className="space-y-3 pt-2">
               <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
                 <div>
                   <p className="text-xs font-bold text-slate-900">Step 1 (Initial AI Strategic Hook)</p>
-                  <p className="text-[11px] text-slate-500">Day 0 (Immediate / Manual)</p>
+                  <p className="text-[11px] text-slate-500">Day 0 — approved for manual send (not automatic)</p>
                 </div>
-                <span className="text-xs font-bold text-emerald-600">Active</span>
+                <span className="text-xs font-bold text-blue-600">Manual</span>
               </div>
 
               <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
                 <div>
                   <p className="text-xs font-bold text-slate-900">Step 2 (Practical Workflow Proof)</p>
-                  <p className="text-[11px] text-slate-500">Delay after Step 1</p>
+                  <p className="text-[11px] text-slate-500">Delay after Step 1 — auto-sent once the drip is active</p>
                 </div>
                 <div className="flex items-center gap-1">
                   <input
@@ -2430,7 +2726,7 @@ export default function CompanyDetail() {
               <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200">
                 <div>
                   <p className="text-xs font-bold text-slate-900">Step 3 (Assessment Invitation / Breakup)</p>
-                  <p className="text-[11px] text-slate-500">Delay after Step 1</p>
+                  <p className="text-[11px] text-slate-500">Delay after Step 1 — auto-sent once the drip is active</p>
                 </div>
                 <div className="flex items-center gap-1">
                   <input
@@ -2466,6 +2762,17 @@ export default function CompanyDetail() {
           </div>
         </div>
       )}
+
+      {/* Quarantine Release Modal */}
+      <QuarantineReleaseModal
+        isOpen={Boolean(quarantineReleaseTarget)}
+        onClose={() => setQuarantineReleaseTarget(null)}
+        message={quarantineReleaseTarget}
+        companyName={company?.companyName}
+        onSuccess={() => {
+          fetchOutreach();
+        }}
+      />
     </div>
   );
 }

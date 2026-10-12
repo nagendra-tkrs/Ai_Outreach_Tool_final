@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api';
+import { computeDashboardStats, canSendMessage } from '../utils/outreachStats';
+import QuarantineReleaseModal from '../components/QuarantineReleaseModal';
 
 const STATUS_BADGES = {
   draft: 'bg-slate-100 text-slate-700 border-slate-200',
@@ -41,33 +43,78 @@ const formatTime = (dateStr) => {
 };
 
 export default function Outbox() {
-  const [activeView, setActiveView] = useState('tracking'); // 'tracking' | 'messages'
+  const [activeView, setActiveView] = useState('tracking'); // 'tracking' | 'messages' | 'replies'
   const [messages, setMessages] = useState([]);
   const [trackingRecords, setTrackingRecords] = useState([]);
   const [trackingStats, setTrackingStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [syncingGmail, setSyncingGmail] = useState(false);
+  const [syncStats, setSyncStats] = useState(null);
+  const [replyEvents, setReplyEvents] = useState([]);
+  const [loadingReplyEvents, setLoadingReplyEvents] = useState(false);
+  const [replyEventsPagination, setReplyEventsPagination] = useState({ page: 1, limit: 20, total: 0, totalPages: 1 });
+  const [selectedReplyEvent, setSelectedReplyEvent] = useState(null);
   const [filterStatus, setFilterStatus] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [selectedRecord, setSelectedRecord] = useState(null);
+  const [quarantineReleaseTarget, setQuarantineReleaseTarget] = useState(null);
   const [sendingId, setSendingId] = useState(null);
   const [updatingReplyId, setUpdatingReplyId] = useState(null);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
+  const fetchReplyEvents = async (page = 1) => {
+    setLoadingReplyEvents(true);
+    try {
+      const res = await api.get(`/outreach/reply-events?page=${page}&limit=20`);
+      if (res && res.success) {
+        setReplyEvents(res.data || []);
+        if (res.pagination) {
+          setReplyEventsPagination(res.pagination);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load reply events:', err);
+    } finally {
+      setLoadingReplyEvents(false);
+    }
+  };
+
   const fetchOutbox = async () => {
     setLoading(true);
     setError('');
     try {
-      const [messagesRes, trackingRes, statsRes] = await Promise.all([
-        api.get('/outreach/all').catch(() => ({ data: [] })),
-        api.get('/outreach/records').catch(() => ({ data: [] })),
-        api.get('/outreach/stats').catch(() => ({ data: null })),
+      // Use allSettled so one failing endpoint does not hide the others, while
+      // still surfacing genuine API errors instead of silently swallowing them.
+      const [messagesRes, trackingRes, statsRes] = await Promise.allSettled([
+        api.get('/outreach/all'),
+        api.get('/outreach/records'),
+        api.get('/outreach/stats'),
       ]);
-      setMessages(messagesRes.data || []);
-      setTrackingRecords(trackingRes.data || []);
-      setTrackingStats(statsRes.data || null);
+      const failed = [];
+      if (messagesRes.status === 'fulfilled') {
+        setMessages(messagesRes.value?.data || []);
+      } else {
+        setMessages([]);
+        failed.push('messages');
+      }
+      if (trackingRes.status === 'fulfilled') {
+        setTrackingRecords(trackingRes.value?.data || []);
+      } else {
+        setTrackingRecords([]);
+        failed.push('tracking');
+      }
+      if (statsRes.status === 'fulfilled') {
+        setTrackingStats(statsRes.value?.data || null);
+      } else {
+        setTrackingStats(null);
+        failed.push('statistics');
+      }
+      if (failed.length > 0) {
+        setError(`Failed to load ${failed.join(', ')} from the server.`);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -77,9 +124,19 @@ export default function Outbox() {
 
   useEffect(() => {
     fetchOutbox();
+    fetchReplyEvents(1);
   }, []);
 
   const handleSend = async (message) => {
+    if (message?.quarantined === true || Boolean(message?.quarantine && message?.quarantine?.active === true)) {
+      setError('This message is quarantined. Review and release it before sending.');
+      return;
+    }
+    // FIX 4: never attempt to resend an already-sent message from the UI.
+    if (!canSendMessage(message)) {
+      setError('This message has already been sent. Duplicate sends are blocked.');
+      return;
+    }
     setSendingId(message._id);
     setError('');
     try {
@@ -149,6 +206,36 @@ export default function Outbox() {
     }
   };
 
+  const handleSyncGmailReplies = async () => {
+    setSyncingGmail(true);
+    setError('');
+    try {
+      const res = await api.post('/outreach/sync-replies', {
+        query: 'newer_than:7d',
+        maxResults: 20,
+      });
+      if (res && res.success) {
+        setSyncStats({
+          ...(res.stats || {}),
+          message: res.message,
+          timestamp: new Date(),
+        });
+        setSuccessMsg(res.message || 'Gmail replies checked successfully.');
+        setTimeout(() => setSuccessMsg(''), 5000);
+        await Promise.allSettled([
+          fetchOutbox(),
+          fetchReplyEvents(1),
+        ]);
+      } else {
+        setError(res?.message || 'Failed to sync Gmail replies.');
+      }
+    } catch (err) {
+      setError(`Failed to sync Gmail replies: ${err.message}`);
+    } finally {
+      setSyncingGmail(false);
+    }
+  };
+
   // Filter messages
   const filteredMessages = messages.filter((m) => {
     if (filterStatus !== 'all' && m.status !== filterStatus) return false;
@@ -181,10 +268,30 @@ export default function Outbox() {
     return true;
   });
 
-  const totalSent = trackingStats?.initialSent || messages.filter((m) => m.status === 'sent').length;
-  const totalFollowUps = trackingStats?.totalFollowUpsSent || 0;
-  const totalReplies = trackingStats?.repliesReceived || 0;
-  const totalPendingFollowUps = trackingStats?.followUpsPending || 0;
+  // Filter reply events
+  const filteredReplyEvents = replyEvents.filter((ev) => {
+    if (filterStatus === 'matched' && !ev.matched) return false;
+    if (filterStatus === 'review' && ev.correlation?.confidence !== 'unconfirmed_sender_only') return false;
+    if (filterStatus === 'unmatched' && (ev.matched || ev.correlation?.confidence === 'unconfirmed_sender_only')) return false;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const matchFrom = ev.fromEmail?.toLowerCase().includes(q) || ev.fromRaw?.toLowerCase().includes(q);
+      const matchSub = ev.subject?.toLowerCase().includes(q);
+      const matchBody = ev.snippet?.toLowerCase().includes(q);
+      const matchRecip = ev.recipientEmail?.toLowerCase().includes(q);
+      return matchFrom || matchSub || matchBody || matchRecip;
+    }
+    return true;
+  });
+
+  // FIX 1: use the real API field names (followUp1Sent/followUp2Sent/replied/
+  // followUpsPending) and the already-formatted replyRate string.
+  const dashboard = computeDashboardStats(trackingStats);
+  const totalSent = trackingStats ? dashboard.initialSent : messages.filter((m) => m.status === 'sent').length;
+  const totalFollowUps = dashboard.followUpsSent;
+  const totalReplies = dashboard.repliesReceived;
+  const totalPendingFollowUps = dashboard.followUpsPending;
+  const replyRateText = dashboard.replyRateText;
 
   return (
     <div className="space-y-6 animate-fadeIn">
@@ -212,6 +319,16 @@ export default function Outbox() {
           </button>
 
           <button
+            onClick={handleSyncGmailReplies}
+            disabled={syncingGmail}
+            className="px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-2 disabled:opacity-50"
+            title="Fetch recent prospect replies from Gmail read-only inbox"
+          >
+            <span className={syncingGmail ? 'animate-spin' : ''}>{syncingGmail ? '🔄' : '📥'}</span>
+            <span>{syncingGmail ? 'Syncing Gmail...' : 'Sync Gmail Replies'}</span>
+          </button>
+
+          <button
             onClick={handleExportExcel}
             disabled={exporting}
             className="px-5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-bold transition-all shadow-md flex items-center gap-2 disabled:opacity-50"
@@ -233,6 +350,64 @@ export default function Outbox() {
         <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded-2xl text-xs flex items-center justify-between animate-fadeIn">
           <span>{successMsg}</span>
           <button onClick={() => setSuccessMsg('')} className="font-bold text-emerald-600">&times;</button>
+        </div>
+      )}
+
+      {/* Sync Stats Banner (displayed when manual sync has been performed) */}
+      {syncStats && (
+        <div className="bg-gradient-to-r from-indigo-50/90 via-blue-50/70 to-teal-50/70 border border-indigo-200/90 rounded-2xl p-4 text-xs text-slate-800 shadow-xs space-y-3 animate-fadeIn">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-base">📬</span>
+              <h3 className="font-bold text-slate-900">Gmail Read-Only Reply Sync Results</h3>
+              <span className="text-[10px] bg-indigo-100 text-indigo-800 font-mono font-bold px-2 py-0.5 rounded-full">
+                {syncStats.message || 'Complete'}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setActiveView('replies');
+                  setFilterStatus('all');
+                  fetchReplyEvents(1);
+                }}
+                className="text-xs font-bold text-indigo-600 hover:text-indigo-800 underline flex items-center gap-1"
+              >
+                <span>View Ingested Replies</span>
+                <span>&rarr;</span>
+              </button>
+              <button
+                onClick={() => setSyncStats(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold px-2 py-0.5 text-sm"
+                title="Dismiss"
+              >
+                &times;
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 pt-1">
+            <div className="bg-white/80 p-3 rounded-xl border border-indigo-100/80 shadow-2xs">
+              <span className="text-[10px] font-bold uppercase text-slate-400 block">Total Checked</span>
+              <span className="text-xl font-black text-slate-900">{syncStats.total ?? 0}</span>
+            </div>
+            <div className="bg-white/80 p-3 rounded-xl border border-emerald-100/80 shadow-2xs">
+              <span className="text-[10px] font-bold uppercase text-emerald-600 block">Matched to Outreach</span>
+              <span className="text-xl font-black text-emerald-600">{syncStats.correlated ?? 0}</span>
+            </div>
+            <div className="bg-white/80 p-3 rounded-xl border border-amber-100/80 shadow-2xs">
+              <span className="text-[10px] font-bold uppercase text-amber-600 block">Unmatched / Review</span>
+              <span className="text-xl font-black text-amber-600">{syncStats.unmatched ?? 0}</span>
+            </div>
+            <div className="bg-white/80 p-3 rounded-xl border border-blue-100/80 shadow-2xs">
+              <span className="text-[10px] font-bold uppercase text-blue-600 block">Newly Ingested</span>
+              <span className="text-xl font-black text-blue-600">{syncStats.inserted ?? 0}</span>
+            </div>
+            <div className="bg-white/80 p-3 rounded-xl border border-slate-100/80 shadow-2xs">
+              <span className="text-[10px] font-bold uppercase text-slate-400 block">Already Processed</span>
+              <span className="text-xl font-black text-slate-600">{syncStats.alreadyProcessed ?? 0}</span>
+            </div>
+          </div>
         </div>
       )}
 
@@ -260,13 +435,13 @@ export default function Outbox() {
 
         <div className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-xs col-span-2 sm:col-span-1">
           <p className="text-[11px] font-bold uppercase text-slate-400">Reply Rate</p>
-          <p className="text-2xl font-black text-purple-600 mt-1.5">{trackingStats?.replyRate || 0}%</p>
+          <p className="text-2xl font-black text-purple-600 mt-1.5">{replyRateText}</p>
         </div>
       </div>
 
       {/* View Switcher & Search Bar */}
       <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 border-b border-slate-200 pb-3">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button
             onClick={() => { setActiveView('tracking'); setFilterStatus('all'); }}
             className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
@@ -289,6 +464,18 @@ export default function Outbox() {
           >
             <span>✉️</span>
             <span>Sequence Outbox ({messages.length})</span>
+          </button>
+
+          <button
+            onClick={() => { setActiveView('replies'); setFilterStatus('all'); fetchReplyEvents(1); }}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
+              activeView === 'replies'
+                ? 'bg-indigo-600 text-white shadow-sm'
+                : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <span>📥</span>
+            <span>Gmail Reply Events ({replyEventsPagination.total})</span>
           </button>
         </div>
 
@@ -333,13 +520,32 @@ export default function Outbox() {
               {tab.label}
             </button>
           ))
-        ) : (
+        ) : activeView === 'messages' ? (
           [
             { id: 'all', label: `All Messages (${messages.length})` },
             { id: 'sent', label: `Dispatched (${messages.filter(m => m.status === 'sent').length})` },
             { id: 'scheduled', label: `Scheduled Drip (${messages.filter(m => m.status === 'scheduled').length})` },
             { id: 'draft', label: `Drafts (${messages.filter(m => m.status === 'draft').length})` },
             { id: 'failed', label: `Failed (${messages.filter(m => m.status === 'failed').length})` },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setFilterStatus(tab.id)}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                filterStatus === tab.id
+                  ? 'bg-slate-900 text-white shadow-sm'
+                  : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))
+        ) : (
+          [
+            { id: 'all', label: `All Ingested (${replyEventsPagination.total})` },
+            { id: 'matched', label: `Matched (${replyEvents.filter(e => e.matched).length})` },
+            { id: 'review', label: `Needs Review (${replyEvents.filter(e => e.correlation?.confidence === 'unconfirmed_sender_only').length})` },
+            { id: 'unmatched', label: `Unmatched (${replyEvents.filter(e => !e.matched && e.correlation?.confidence !== 'unconfirmed_sender_only').length})` },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -527,7 +733,7 @@ export default function Outbox() {
             </div>
           </div>
         )
-      ) : (
+      ) : activeView === 'messages' ? (
         /* MESSAGES OUTBOX TABLE */
         filteredMessages.length === 0 ? (
           <div className="bg-white rounded-3xl border border-slate-200 p-16 text-center">
@@ -600,6 +806,11 @@ export default function Outbox() {
                           <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase border ${STATUS_BADGES[msg.status] || STATUS_BADGES.draft}`}>
                             {msg.status.toUpperCase()}
                           </span>
+                          {msg.quarantined === true && (
+                            <span className="block mt-1 text-[10px] bg-rose-50 text-rose-700 font-bold px-2 py-0.5 rounded-full border border-rose-200 text-center">
+                              🔒 Quarantined
+                            </span>
+                          )}
                         </td>
 
                         <td className="px-4 py-4 whitespace-nowrap text-slate-500 font-mono text-[11px]">
@@ -611,23 +822,42 @@ export default function Outbox() {
                         </td>
 
                         <td className="px-5 py-4 whitespace-nowrap text-right space-x-2">
+                          {msg.quarantined === true && (
+                            <button
+                              type="button"
+                              onClick={() => setQuarantineReleaseTarget(msg)}
+                              className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-300 rounded-lg text-xs font-bold transition-colors shadow-2xs"
+                              title="Release this draft from quarantine"
+                            >
+                              🔓 Release
+                            </button>
+                          )}
                           <button
                             onClick={() => setSelectedMessage(msg)}
                             className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors"
                           >
                             Preview
                           </button>
-                          <button
-                            onClick={() => handleSend(msg)}
-                            disabled={sendingId === msg._id || !targetEmail}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs ${
-                              msg.status === 'sent'
-                                ? 'bg-slate-800 text-white hover:bg-slate-900'
-                                : 'bg-emerald-600 text-white hover:bg-emerald-700'
-                            } disabled:opacity-50`}
-                          >
-                            {sendingId === msg._id ? 'Sending...' : msg.status === 'sent' ? 'Resend' : 'Send Now'}
-                          </button>
+                          {canSendMessage(msg) ? (
+                            <button
+                              onClick={() => handleSend(msg)}
+                              disabled={sendingId === msg._id || !targetEmail}
+                              className="px-3 py-1.5 rounded-lg text-xs font-bold transition-colors shadow-xs bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                              {sendingId === msg._id ? 'Sending...' : msg.status === 'failed' ? 'Retry Send' : 'Send Now'}
+                            </button>
+                          ) : msg.status === 'sending' ? (
+                            <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                              Sending&hellip;
+                            </span>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200"
+                              title="Already sent — duplicate sends are blocked"
+                            >
+                              ✓ Sent
+                            </span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -635,6 +865,159 @@ export default function Outbox() {
                 </tbody>
               </table>
             </div>
+          </div>
+        )
+      ) : (
+        /* REPLIES VIEW TABLE */
+        loadingReplyEvents ? (
+          <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center text-slate-400">
+            <div className="inline-block w-8 h-8 border-3 border-indigo-600 border-t-transparent rounded-full animate-spin mb-3"></div>
+            <p className="font-semibold text-sm">Loading ingested reply events...</p>
+          </div>
+        ) : filteredReplyEvents.length === 0 ? (
+          <div className="bg-white rounded-3xl border border-slate-200 p-16 text-center">
+            <div className="w-16 h-16 rounded-3xl bg-blue-50 text-blue-600 flex items-center justify-center text-3xl mx-auto mb-4">
+              📥
+            </div>
+            <h3 className="font-bold text-slate-900 text-lg">No Ingested Gmail Replies</h3>
+            <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1 mb-6">
+              Trigger a read-only Gmail sync to check for new prospect replies and match them to your sent sequences.
+            </p>
+            <button
+              onClick={handleSyncGmailReplies}
+              disabled={syncingGmail}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl text-xs font-bold shadow-md hover:from-blue-700 hover:to-indigo-700 disabled:opacity-50"
+            >
+              <span className={syncingGmail ? 'animate-spin' : ''}>{syncingGmail ? '🔄' : '📥'}</span>
+              <span>{syncingGmail ? 'Syncing Gmail...' : 'Sync Gmail Replies Now'}</span>
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-xs">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50/80 border-b border-slate-200/80 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+                    <tr>
+                      <th className="px-5 py-3.5">Sender / From</th>
+                      <th className="px-5 py-3.5">Subject &amp; Snippet</th>
+                      <th className="px-4 py-3.5">Received Date</th>
+                      <th className="px-4 py-3.5">Correlation Match</th>
+                      <th className="px-5 py-3.5 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredReplyEvents.map((ev) => (
+                      <tr key={ev._id || ev.gmailMessageId} className="hover:bg-slate-50/80 transition-colors">
+                        <td className="px-5 py-4">
+                          <p className="font-bold text-slate-900 truncate max-w-[200px]">
+                            {ev.fromRaw || ev.fromEmail || 'Unknown'}
+                          </p>
+                          <p className="text-slate-500 text-[11px] font-mono mt-0.5 truncate max-w-[200px]">
+                            {ev.fromEmail}
+                          </p>
+                          {ev.toEmail && (
+                            <p className="text-[10px] text-slate-400 font-mono mt-0.5 truncate max-w-[200px]">
+                              To: {ev.toEmail}
+                            </p>
+                          )}
+                        </td>
+
+                        <td className="px-5 py-4 max-w-xs">
+                          <p className="font-semibold text-slate-900 truncate">
+                            {ev.subject || '(No Subject)'}
+                          </p>
+                          <p className="text-[11px] text-slate-500 line-clamp-2 mt-0.5 leading-relaxed">
+                            {ev.snippet || ev.bodyText?.slice(0, 100) || '—'}
+                          </p>
+                          {ev.rfcMessageId && (
+                            <p className="text-[10px] text-slate-400 font-mono truncate mt-1">
+                              ID: {ev.rfcMessageId}
+                            </p>
+                          )}
+                        </td>
+
+                        <td className="px-4 py-4 whitespace-nowrap">
+                          <span className="font-semibold text-slate-800 block text-[11px]">
+                            {formatDate(ev.receivedAt)}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
+                            {formatTime(ev.receivedAt)}
+                          </span>
+                        </td>
+
+                        <td className="px-4 py-4 whitespace-nowrap">
+                          {ev.matched ? (
+                            <div className="space-y-1">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                ✓ Matched ({ev.correlation?.matchedBy || 'Header'})
+                              </span>
+                              {ev.correlation?.step && (
+                                <span className="block text-[10px] text-indigo-700 font-semibold">
+                                  Sequence Step {ev.correlation.step}
+                                </span>
+                              )}
+                              {ev.correlation?.recipientEmail && (
+                                <span className="block text-[10px] text-slate-500 font-mono truncate max-w-[160px]">
+                                  {ev.correlation.recipientEmail}
+                                </span>
+                              )}
+                            </div>
+                          ) : ev.correlation?.confidence === 'unconfirmed_sender_only' ? (
+                            <div className="space-y-1">
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-100 text-amber-800 border border-amber-300" title={ev.correlation?.note}>
+                                ⚠️ Needs Review
+                              </span>
+                              <span className="block text-[10px] text-amber-700 max-w-[160px] truncate" title={ev.correlation?.note}>
+                                Sender matches prospect, no linking header
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium text-slate-500 bg-slate-100 border border-slate-200">
+                              Unmatched
+                            </span>
+                          )}
+                        </td>
+
+                        <td className="px-5 py-4 whitespace-nowrap text-right">
+                          <button
+                            onClick={() => setSelectedReplyEvent(ev)}
+                            className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors"
+                          >
+                            Inspect Reply
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Pagination Controls */}
+            {replyEventsPagination.totalPages > 1 && (
+              <div className="flex items-center justify-between px-2 text-xs text-slate-500">
+                <span>
+                  Showing page {replyEventsPagination.page} of {replyEventsPagination.totalPages} ({replyEventsPagination.total} total events)
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => fetchReplyEvents(replyEventsPagination.page - 1)}
+                    disabled={replyEventsPagination.page <= 1 || loadingReplyEvents}
+                    className="px-3 py-1.5 bg-white border border-slate-200 rounded-xl font-bold hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    &larr; Previous
+                  </button>
+                  <button
+                    onClick={() => fetchReplyEvents(replyEventsPagination.page + 1)}
+                    disabled={replyEventsPagination.page >= replyEventsPagination.totalPages || loadingReplyEvents}
+                    className="px-3 py-1.5 bg-white border border-slate-200 rounded-xl font-bold hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    Next &rarr;
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )
       )}
@@ -816,31 +1199,181 @@ export default function Outbox() {
             </div>
 
             <div className="flex justify-between items-center pt-3 border-t border-slate-100">
-              <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${STATUS_BADGES[selectedMessage.status]}`}>
-                Status: {selectedMessage.status?.toUpperCase()}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${STATUS_BADGES[selectedMessage.status]}`}>
+                  Status: {selectedMessage.status?.toUpperCase()}
+                </span>
+                {selectedMessage.quarantined === true && (
+                  <span className="text-[10px] bg-rose-50 text-rose-700 font-bold px-2 py-0.5 rounded-full border border-rose-200">
+                    🔒 Quarantined
+                  </span>
+                )}
+              </div>
               <div className="flex gap-2">
+                {selectedMessage.quarantined === true && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const msg = selectedMessage;
+                      setSelectedMessage(null);
+                      setQuarantineReleaseTarget(msg);
+                    }}
+                    className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-300 rounded-xl text-xs font-bold transition-colors shadow-2xs flex items-center gap-1"
+                    title="Release from quarantine"
+                  >
+                    <span>🔓</span>
+                    <span>Release Quarantine</span>
+                  </button>
+                )}
                 <button
                   onClick={() => setSelectedMessage(null)}
                   className="px-4 py-2 border border-slate-200 text-slate-700 rounded-xl text-xs font-bold hover:bg-slate-50"
                 >
                   Close
                 </button>
-                <button
-                  onClick={() => {
-                    handleSend(selectedMessage);
-                    setSelectedMessage(null);
-                  }}
-                  disabled={sendingId === selectedMessage._id}
-                  className="px-5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl text-xs font-bold hover:from-emerald-700 hover:to-teal-700 shadow-md disabled:opacity-50"
-                >
-                  Send Outbound Email
-                </button>
+                {canSendMessage(selectedMessage) ? (
+                  <button
+                    onClick={() => {
+                      handleSend(selectedMessage);
+                      setSelectedMessage(null);
+                    }}
+                    disabled={sendingId === selectedMessage._id}
+                    className="px-5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl text-xs font-bold hover:from-emerald-700 hover:to-teal-700 shadow-md disabled:opacity-50"
+                  >
+                    Send Outbound Email
+                  </button>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-4 py-2 rounded-xl text-xs font-bold bg-slate-100 text-slate-600 border border-slate-200">
+                    ✓ Already Sent
+                  </span>
+                )}
               </div>
             </div>
           </div>
         </div>
       )}
+
+      {/* REPLY EVENT DETAIL MODAL */}
+      {selectedReplyEvent && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-2xl w-full p-6 max-h-[90vh] overflow-y-auto shadow-2xl space-y-4 animate-fadeIn">
+            <div className="flex items-start justify-between border-b border-slate-100 pb-4">
+              <div>
+                <span className={`text-[10px] font-extrabold uppercase tracking-wider px-2.5 py-1 rounded-md ${
+                  selectedReplyEvent.matched
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : selectedReplyEvent.correlation?.confidence === 'unconfirmed_sender_only'
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-slate-100 text-slate-700'
+                }`}>
+                  {selectedReplyEvent.matched
+                    ? `Matched: ${selectedReplyEvent.correlation?.matchedBy || 'Header'}`
+                    : selectedReplyEvent.correlation?.confidence === 'unconfirmed_sender_only'
+                    ? 'Unconfirmed Sender (Manual Review)'
+                    : 'Unmatched Inbound Email'}
+                </span>
+                <h3 className="text-lg font-black text-slate-900 mt-2">{selectedReplyEvent.subject || '(No Subject)'}</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  From: <strong className="text-slate-800">{selectedReplyEvent.fromRaw || selectedReplyEvent.fromEmail}</strong>
+                </p>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Received: {formatDate(selectedReplyEvent.receivedAt)} at {formatTime(selectedReplyEvent.receivedAt)}
+                </p>
+              </div>
+              <button
+                onClick={() => setSelectedReplyEvent(null)}
+                className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center font-bold text-base"
+              >
+                &times;
+              </button>
+            </div>
+
+            {/* Correlation Details Box */}
+            <div className="p-4 rounded-2xl border border-slate-200 bg-slate-50 space-y-2 text-xs">
+              <h4 className="font-bold text-slate-700 uppercase text-[10px] tracking-wider">Correlation &amp; Matching Engine</h4>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-slate-400 block text-[11px]">Match Status:</span>
+                  <span className="font-semibold text-slate-800">
+                    {selectedReplyEvent.matched ? '✓ Deterministically Matched' : 'Not Matched to Outreach Sequence'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[11px]">Confidence Level:</span>
+                  <span className="font-mono font-semibold text-slate-800">
+                    {selectedReplyEvent.correlation?.confidence || 'none'}
+                  </span>
+                </div>
+                {selectedReplyEvent.correlation?.matchedBy && (
+                  <div>
+                    <span className="text-slate-400 block text-[11px]">Matched Via:</span>
+                    <span className="font-mono text-indigo-700 font-bold">
+                      {selectedReplyEvent.correlation.matchedBy}
+                    </span>
+                  </div>
+                )}
+                {selectedReplyEvent.correlation?.step && (
+                  <div>
+                    <span className="text-slate-400 block text-[11px]">Outbound Sequence Step:</span>
+                    <span className="font-semibold text-slate-800">
+                      Step {selectedReplyEvent.correlation.step}
+                    </span>
+                  </div>
+                )}
+              </div>
+              {selectedReplyEvent.correlation?.note && (
+                <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-[11px] mt-2">
+                  ℹ️ {selectedReplyEvent.correlation.note}
+                </div>
+              )}
+            </div>
+
+            {/* Email Headers */}
+            <div className="space-y-1">
+              <h4 className="font-bold text-slate-700 uppercase text-[10px] tracking-wider">Message Header Identification</h4>
+              <div className="p-3 bg-slate-900 text-emerald-400 rounded-xl font-mono text-[11px] space-y-1 overflow-x-auto">
+                <p><span className="text-slate-400">RFC Message-ID:</span> {selectedReplyEvent.rfcMessageId || '—'}</p>
+                <p><span className="text-slate-400">In-Reply-To:</span> {selectedReplyEvent.inReplyTo || '—'}</p>
+                {Array.isArray(selectedReplyEvent.references) && selectedReplyEvent.references.length > 0 && (
+                  <p><span className="text-slate-400">References:</span> {selectedReplyEvent.references.join(', ')}</p>
+                )}
+                <p><span className="text-slate-400">Gmail Message ID:</span> {selectedReplyEvent.gmailMessageId}</p>
+                {selectedReplyEvent.gmailThreadId && (
+                  <p><span className="text-slate-400">Gmail Thread ID:</span> {selectedReplyEvent.gmailThreadId}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Decoded Plain Text Body */}
+            <div className="space-y-1">
+              <h4 className="font-bold text-slate-700 uppercase text-[10px] tracking-wider">Message Content (Decoded Plain Text)</h4>
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-800 whitespace-pre-wrap font-sans max-h-60 overflow-y-auto leading-relaxed">
+                {selectedReplyEvent.bodyText || selectedReplyEvent.snippet || '(No body text)'}
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-3 border-t border-slate-100">
+              <button
+                onClick={() => setSelectedReplyEvent(null)}
+                className="px-5 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QUARANTINE RELEASE MODAL */}
+      <QuarantineReleaseModal
+        isOpen={Boolean(quarantineReleaseTarget)}
+        onClose={() => setQuarantineReleaseTarget(null)}
+        message={quarantineReleaseTarget}
+        companyName={quarantineReleaseTarget?.companyId?.companyName}
+        onSuccess={() => {
+          fetchOutbox();
+        }}
+      />
     </div>
   );
 }

@@ -243,3 +243,63 @@ def match_person_to_email(person_name: str, email: str) -> dict:
         "pattern": "none",
         "reason": f"Email localpart '{local_raw}' does not match name '{person_name}'"
     }
+
+
+def canonical_person_email_match(person_name: str, email: str, company_domain: str = "") -> dict:
+    """
+    D6: THE canonical person-to-email matcher.
+
+    All overlapping matchers in the codebase (email_matches_person in the
+    decision-maker engine and evaluate_person_email_match in contact_service)
+    delegate to this single implementation. It combines:
+
+      - email syntax / generic-mailbox checks
+      - company-domain validation (when a company domain is known)
+      - the full nickname / middle-name / initials / hyphenated-name / pattern
+        matcher (match_person_to_email)
+
+    Returns a dict with keys:
+      matched, confidence, score, pattern, reason, personEmailMatch,
+      domainMatched, domain
+    """
+    if not email or "@" not in email:
+        return {
+            "matched": False, "confidence": "NONE", "score": 0, "pattern": "none",
+            "reason": "No valid email address provided", "personEmailMatch": "unknown",
+            "domainMatched": False, "domain": "",
+        }
+    if not person_name or not str(person_name).strip():
+        return {
+            "matched": False, "confidence": "NONE", "score": 0, "pattern": "none",
+            "reason": "No person name provided", "personEmailMatch": "unknown",
+            "domainMatched": False, "domain": email.split("@")[1].lower().strip(),
+        }
+    if is_generic_email(email):
+        local = email.split("@")[0].lower().strip()
+        return {
+            "matched": False, "confidence": "NONE", "score": 0, "pattern": "none",
+            "reason": f"Generic corporate address ({local}@)", "personEmailMatch": "false",
+            "domainMatched": False, "domain": email.split("@")[1].lower().strip(),
+        }
+
+    domain = email.split("@")[1].lower().strip()
+    if company_domain:
+        dm = validate_domain_match(email, company_domain)
+        domain_ok = bool(dm.get("matched"))
+    else:
+        domain_ok = True
+
+    result = match_person_to_email(person_name, email)
+    result["domainMatched"] = domain_ok
+    result["domain"] = domain
+
+    if not domain_ok:
+        result["matched"] = False
+        result["personEmailMatch"] = "false"
+        result["reason"] = (
+            f"Email domain (@{domain}) does not match company domain: {result.get('reason', '')}"
+        )
+    else:
+        result["personEmailMatch"] = "true" if result.get("matched") else "false"
+
+    return result

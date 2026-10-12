@@ -287,8 +287,19 @@ async def test_outreach_endpoints(client):
         assert records_res.status_code == 200
         assert records_res.json()["success"] is True
 
+        # Check Excel export endpoint returns valid XLSX binary bytes
+        export_res = await client.get("/api/outreach/export")
+        assert export_res.status_code == 200
+        assert export_res.headers.get("content-type") == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        assert 'filename="outreach_report_' in export_res.headers.get("content-disposition", "")
+        assert export_res.content.startswith(b"PK\x03\x04")
+        exported_wb = openpyxl.load_workbook(io.BytesIO(export_res.content))
+        assert "Outreach Tracking" in exported_wb.sheetnames
+        assert exported_wb["Outreach Tracking"].max_column == 15
+
     finally:
         await db.companies.delete_one({"_id": comp_doc.inserted_id})
         await db.outreachmessages.delete_many({"companyId": comp_doc.inserted_id})
         await db.outreachrecords.delete_many({"companyId": comp_doc.inserted_id})
+
 

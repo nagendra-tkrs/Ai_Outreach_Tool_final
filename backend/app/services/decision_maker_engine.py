@@ -15,6 +15,7 @@ except ImportError:
     HAS_DDGS = False
 
 from app.services.search.public_web_search_provider import is_circuit_open, trip_circuit
+from app.services.email_validation_service import canonical_person_email_match
 
 # ============================================================
 # CONFIGURATION
@@ -1541,72 +1542,16 @@ def name_tokens(name):
     return [token for token in re.findall(r"[a-z]+", clean) if token]
 
 def email_matches_person(email, person_name):
+    """D6: single canonical person->email matcher (delegates to email_validation_service).
+
+    Preserves the historical boolean contract used throughout the engine,
+    including rejection of generic / free-provider mailboxes.
+    """
     email = normalize_email(email)
     if not email or is_generic_email(email) or is_free_email(email):
         return False
-    local_raw = email_local(email)
-    if not local_raw:
-        return False
-    local_clean = re.sub(r"[^a-z0-9]", "", local_raw)
-    tokens = name_tokens(person_name)
-    if not tokens:
-        return False
-
-    # Check both forward order [first, ..., last] and reverse/Asian order [last, ..., first]
-    possible_orders = []
-    if len(tokens) >= 2:
-        possible_orders.append((tokens[0], tokens[-1], tokens[1:-1]))
-        possible_orders.append((tokens[-1], tokens[0], tokens[1:-1]))
-    else:
-        possible_orders.append((tokens[0], "", []))
-
-    for first, last, middles in possible_orders:
-        f_init = first[0] if first else ""
-        l_init = last[0] if last else ""
-
-        # Delimited formats (. _ -)
-        for sep in [".", "_", "-"]:
-            if sep in local_raw:
-                parts = local_raw.split(sep)
-                if len(parts) == 2:
-                    p0, p1 = parts[0], parts[1]
-                    if (p0 == first and p1 == last) or (p0 == f_init and p1 == last) or (p0 == first and p1 == l_init):
-                        return True
-                    if (p0 == last and p1 == first) or (p0 == l_init and p1 == first) or (p0 == last and p1 == f_init):
-                        return True
-                elif len(parts) == 3 and middles:
-                    m = middles[0]
-                    p0, p1, p2 = parts[0], parts[1], parts[2]
-                    if p0 == first and (p1 == m or p1 == m[0]) and p2 == last:
-                        return True
-
-        # Concatenated formats
-        patterns = set()
-        if last:
-            patterns.add(first + last)
-            patterns.add(f_init + last)
-            patterns.add(first + l_init)
-            patterns.add(last + first)
-            patterns.add(last + f_init)
-            patterns.add(l_init + first)
-            patterns.add(f_init + l_init)
-            if len(first) >= 3:
-                patterns.add(first)
-            if len(last) >= 3:
-                patterns.add(last)
-            if middles:
-                m = middles[0]
-                patterns.add(first + m + last)
-                patterns.add(first + m[0] + last)
-                patterns.add(f_init + m[0] + last)
-        else:
-            if len(first) >= 3:
-                patterns.add(first)
-
-        if local_clean in patterns:
-            return True
-
-    return False
+    result = canonical_person_email_match(person_name or "", email)
+    return bool(result.get("matched"))
 
 def person_name_in_text(text, person_name):
     text_norm = normalize_text(text).lower()
@@ -2938,7 +2883,19 @@ def dedupe_candidates(candidates):
     return final
 
 def role_supported_by_evidence(role, evidence, name, company_name):
-    relationships = extract_direct_relationships(evidence, company_name)
+    """D5: Role is supported ONLY when the evidence meaningfully ties the
+    person's NAME to that ROLE. Merely long/unrelated text is NOT support.
+
+    Success paths:
+      1. A name->role relationship is directly extracted for this person with
+         the exact role (or the documented CEO / CFO shorthand equivalents).
+      2. Fallback (looser but still meaningful): the role keyword appears in
+         the same sentence of the evidence that mentions the person's name.
+
+    The previous weak rule `len(evidence) > 30` has been removed so that a few
+    sentences of unrelated prose can never prove a role.
+    """
+    relationships = extract_direct_relationships(evidence or "", company_name)
     target_key = name_key(name)
     for item in relationships:
         if name_key(item["name"]) != target_key:
@@ -2950,7 +2907,24 @@ def role_supported_by_evidence(role, evidence, name, company_name):
             return True
         if role in ("CFO", "Chief Financial Officer") and extracted_role in ("CFO", "Chief Financial Officer"):
             return True
-    return len(relationships) > 0 or len(evidence) > 30
+
+    # Fallback: role phrase must co-occur with the name in the same sentence.
+    low_evidence = normalize_text(evidence or "").lower()
+    low_name = normalize_text(name or "").lower()
+    if not low_evidence or not low_name or low_name not in low_evidence:
+        return False
+    stop_words = {"the", "of", "for", "and", "&", "as", "in", "at", "to"}
+    role_words = [
+        w for w in re.findall(r"[a-z0-9]+", (role or "").lower())
+        if w not in stop_words and len(w) >= 2
+    ]
+    if not role_words:
+        return False
+    name_sentences = [s for s in re.split(r"(?<=[.!?])\s+", low_evidence) if low_name in s]
+    if not name_sentences:
+        return False
+    name_sentence = name_sentences[0]
+    return any(w in name_sentence for w in role_words)
 
 def is_valid_decision_maker(candidate, company_name="", website=""):
     if not isinstance(candidate, dict):
@@ -3016,6 +2990,10 @@ def final_validate_candidate(candidate, company_name, website):
     if role_is_historical(evidence, name, role):
         return False
     if role_attached_to_other_company(evidence, company_name):
+        return False
+    # D5: the claimed role must be supported by the evidence itself, or the
+    # candidate is rejected (an unrelated long evidence text is not support).
+    if not role_supported_by_evidence(role, evidence, name, company_name):
         return False
     return True
 

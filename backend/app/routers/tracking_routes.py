@@ -1,5 +1,6 @@
 import base64
 import re
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import APIRouter, Query, Response
@@ -58,6 +59,40 @@ async def track_click(message_id: str, url: Optional[str] = Query(None)):
     except Exception:
         pass
 
+    # E7: never trust the raw redirect target. Only http/https URLs with an
+    # explicit host are allowed through; javascript:, data:, vbscript:, file:,
+    # and empty schemes are treated as an open-redirect vector and blocked.
+    redirect_target = "/"
     if url:
-        return RedirectResponse(url=url, status_code=307)
-    return RedirectResponse(url="/", status_code=307)
+        parsed = urllib.parse.urlparse(url.strip())
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            redirect_target = url.strip()
+    return RedirectResponse(url=redirect_target, status_code=307)
+
+
+@router.get("/unsubscribe/{message_id}")
+async def track_unsubscribe(message_id: str, source: Optional[str] = Query(None)):
+    """E4: one-click unsubscribe — registers the recipient as suppressed so no
+    further outreach (initial, follow-ups, or manual) can be sent to them."""
+    result = {"success": False, "message": "Invalid unsubscribe link"}
+    try:
+        clean_id = re.sub(r"\.png|\.gif", "", message_id)
+        if is_valid_object_id(clean_id):
+            db = get_database()
+            msg = await db.outreachmessages.find_one({"_id": to_object_id(clean_id)})
+            if msg and msg.get("recipientEmail"):
+                from app.services.send_guard import add_suppression_record
+
+                await add_suppression_record(
+                    msg["recipientEmail"],
+                    reason="Unsubscribed via List-Unsubscribe header or link",
+                    source=source or f"message:{clean_id}",
+                )
+                result = {"success": True, "message": "You have been unsubscribed from further outreach emails."}
+    except Exception:
+        result = {"success": False, "message": "Invalid unsubscribe link"}
+
+    return RedirectResponse(
+        url="/unsubscribed",
+        status_code=307,
+    )

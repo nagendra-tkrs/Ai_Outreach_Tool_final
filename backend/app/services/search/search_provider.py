@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from app.services.search.public_web_search_provider import execute_public_web_search
 
 def env_int(name: str, fallback: int) -> int:
@@ -50,7 +50,7 @@ async def execute_search(query: str, options: dict = None) -> dict:
         'configured': False,
         'error': 'SEARCH_PROVIDER_NOT_CONFIGURED',
         'state': 'SEARCH_UNAVAILABLE',
-        'retrievedAt': datetime.utcnow().isoformat()
+        'retrievedAt': datetime.now(timezone.utc).isoformat()
     }
 
 def build_decision_maker_queries(company_name: str, domain: str, industry: str = '', country: str = '', opportunity_context: str = '') -> list[str]:

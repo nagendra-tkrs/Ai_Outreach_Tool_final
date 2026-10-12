@@ -1,7 +1,7 @@
 import os
 import io
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from fastapi import HTTPException
@@ -37,10 +37,136 @@ def format_time(date_val) -> str:
     hour = hour % 12 or 12
     return f"{hour:02d}:{date_val.minute:02d} {ampm}"
 
-def get_follow_up_delays() -> tuple[int, int]:
-    f1 = int(os.getenv('FOLLOW_UP_1_DELAY_DAYS', 3))
-    f2 = int(os.getenv('FOLLOW_UP_2_DELAY_DAYS', 5))
-    return f1, f2
+async def _find_step_message(db, company_id, step, recipient_email=None):
+    """Find the outreachmessage for a company/step, preferring a recipient match."""
+    query = {"companyId": company_id, "step": step}
+    if recipient_email:
+        query["recipientEmail"] = recipient_email
+    msg = await db.outreachmessages.find_one(query, sort=[("updatedAt", -1)])
+    if not msg and recipient_email:
+        msg = await db.outreachmessages.find_one(
+            {"companyId": company_id, "step": step}, sort=[("updatedAt", -1)]
+        )
+    return msg
+
+
+# Default follow-up delays (days from the prior step's send) applied only when
+# a message carries no explicit `delayDays` — the 3-day (Step 2) / 7-day (Step 3)
+# drip policy. An explicit per-message delayDays is always authoritative.
+DEFAULT_FOLLOWUP_DELAYS = {2: 3, 3: 7}
+
+
+def _followup_delay(msg: dict, step: int) -> int:
+    """The message's own explicit delayDays is authoritative; a MISSING delayDays
+    falls back to the 3-day / 7-day policy default (an explicit 0 is kept)."""
+    raw = msg.get("delayDays")
+    if raw is None:
+        return DEFAULT_FOLLOWUP_DELAYS.get(step, 0)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FOLLOWUP_DELAYS.get(step, 0)
+
+
+async def activate_followups_on_send(record: dict, db, company_id, recipient_email, now):
+    """Activate eligible Step 2/3 follow-ups when the prior step is sent.
+
+    This ARMS draft follow-ups (draft -> scheduled), so a successful Step 1 send
+    always starts the drip — the operator no longer has to pre-schedule the
+    sequence first. Every state is handled explicitly and idempotently:
+
+      * draft      -> atomic transition to `scheduled` with
+                     scheduledAt = now + delayDays (the message's own delay, or
+                     the 3-day/7-day policy default).
+      * scheduled  -> anchored: the existing scheduledAt is kept.
+      * sent       -> record reflects SENT (idempotent re-send).
+      * failed     -> record reflects FAILED.
+      * quarantined-> NEVER armed (Q5 hard guard): record stays PENDING with no
+                     scheduledAt, and the message is left completely untouched.
+    """
+    for step in (2, 3):
+        key = {2: "followUp1", 3: "followUp2"}.get(step)
+        if not key:
+            continue
+        msg = await _find_step_message(db, company_id, step, recipient_email)
+        if not msg:
+            record[key] = {"status": "PENDING"}
+            continue
+        from app.services.send_guard import is_message_quarantined
+        if is_message_quarantined(msg):
+            # Q5: never auto-arm / schedule / send a quarantined message.
+            record[key] = {"status": "PENDING"}
+            continue
+        status = msg.get("status")
+        if status == "sent":
+            record[key] = {
+                "status": "SENT",
+                "sentAt": msg.get("sentAt"),
+                "messageId": str(msg.get("_id")),
+            }
+        elif status == "failed":
+            record[key] = {"status": "FAILED", "error": msg.get("error") or "Previously failed"}
+        elif status == "scheduled" and msg.get("scheduledAt"):
+            # Already armed: keep the existing scheduledAt, just mirror it.
+            record[key] = {"scheduledAt": msg["scheduledAt"], "status": "PENDING"}
+        else:
+            # draft (or any non-terminal state) -> activate atomically.
+            delay = _followup_delay(msg, step)
+            scheduled_at = now + timedelta(days=delay)
+            armed = await db.outreachmessages.find_one_and_update(
+                {
+                    "_id": msg["_id"],
+                    "status": {"$in": ["draft", "scheduled"]},
+                    "quarantined": {"$ne": True},
+                    "quarantine.active": {"$ne": True},
+                },
+                {"$set": {
+                    "status": "scheduled",
+                    "scheduledAt": scheduled_at,
+                    "delayDays": delay,
+                    "updatedAt": now,
+                }},
+                return_document=True,
+            )
+            if not armed:
+                # Lost a race (sent/failed/quarantined concurrently): leave the
+                # record PENDING rather than claiming a schedule we do not own.
+                record[key] = {"status": "PENDING"}
+                continue
+            record[key] = {"scheduledAt": scheduled_at, "status": "PENDING"}
+    return record
+
+
+async def cancel_pending_followups(company_id, recipient_email, reason: str = "prospect_replied"):
+    """Cancel/skip every pending follow-up for a prospect (e.g. after a reply).
+
+    Armed follow-up messages are returned to `draft` (never auto-sent again) and
+    the matching record's pending follow-ups are marked CANCELLED. Already-sent
+    steps are left untouched.
+    """
+    db = get_db()
+    cid = to_object_id(company_id)
+    if not cid or not recipient_email:
+        return 0
+    now = datetime.now(timezone.utc)
+    res = await db.outreachmessages.update_many(
+        {
+            "companyId": cid,
+            "recipientEmail": recipient_email,
+            "step": {"$in": [2, 3]},
+            "status": {"$in": ["scheduled", "approved"]},
+        },
+        {"$set": {"status": "draft", "cancelledReason": reason, "updatedAt": now}},
+    )
+    record = await db.outreachrecords.find_one({"companyId": cid, "recipientEmail": recipient_email})
+    if record:
+        updates = {"updatedAt": now}
+        for key in ("followUp1", "followUp2"):
+            if record.get(key, {}).get("status") == "PENDING":
+                updates[f"{key}.status"] = "CANCELLED"
+        await db.outreachrecords.update_one({"_id": record["_id"]}, {"$set": updates})
+    return res.modified_count
+
 
 async def record_email_dispatch(message: dict, dispatch_result: dict):
     if not message:
@@ -64,10 +190,10 @@ async def record_email_dispatch(message: dict, dispatch_result: dict):
 
     cc_list = dispatch_result.get('ccRecipients') or message.get('ccRecipients') or []
     bcc_list = dispatch_result.get('bccRecipients') or message.get('bccRecipients') or []
-    f1_days, f2_days = get_follow_up_delays()
     is_success = bool(dispatch_result.get('success'))
-    now = dispatch_result.get('sentAt') or datetime.utcnow()
+    now = dispatch_result.get('sentAt') or datetime.now(timezone.utc)
     step = int(message.get('step', 1))
+    is_test_send = bool(dispatch_result.get('isTestSend') or message.get('isTestSend'))
 
     record = await db.outreachrecords.find_one({"companyId": cid, "recipientEmail": target_email})
     if not record:
@@ -88,11 +214,18 @@ async def record_email_dispatch(message: dict, dispatch_result: dict):
             "followUp2": {"status": 'PENDING'},
             "replyStatus": 'NO_REPLY',
             "campaignStatus": 'PENDING',
+            "isTestSend": is_test_send,
             "createdAt": now,
             "updatedAt": now
         }
         res = await db.outreachrecords.insert_one(record)
         record["_id"] = res.inserted_id
+    elif record.get('isTestSend') != is_test_send:
+        # E9: keep the test/sandbox provenance tag consistent on existing records
+        await db.outreachrecords.update_one(
+            {"_id": record["_id"]}, {"$set": {"isTestSend": is_test_send}}
+        )
+        record["isTestSend"] = is_test_send
 
     if step == 1:
         record["emailSubject"] = message.get('subject', '')
@@ -103,10 +236,10 @@ async def record_email_dispatch(message: dict, dispatch_result: dict):
                 "error": None,
                 "messageId": str(message.get('_id', ''))
             }
-            record["followUp1"] = {
-                "scheduledAt": now + timedelta(days=f1_days),
-                "status": 'PENDING'
-            }
+            # Activate the drip: eligible Step 2/3 drafts are armed to `scheduled`
+            # off this send (3-day / 7-day policy). Quarantined follow-ups are
+            # never armed and stay PENDING.
+            await activate_followups_on_send(record, db, cid, target_email, now)
             record["campaignStatus"] = 'INITIAL_SENT'
             record["lastContactedAt"] = now
         else:
@@ -122,10 +255,9 @@ async def record_email_dispatch(message: dict, dispatch_result: dict):
                 "error": None,
                 "messageId": str(message.get('_id', ''))
             }
-            record["followUp2"] = {
-                "scheduledAt": now + timedelta(days=f2_days),
-                "status": 'PENDING'
-            }
+            # Step 3 was normally armed when Step 1 went out; if it was only
+            # activated later, arm it now from this send (idempotent).
+            await activate_followups_on_send(record, db, cid, target_email, now)
             record["campaignStatus"] = 'FOLLOW_UP_1_SENT'
             record["lastContactedAt"] = now
         else:
@@ -160,6 +292,10 @@ async def get_outreach_records(query_params: dict = None):
         query['replyStatus'] = query_params['replyStatus']
     if query_params.get('campaignStatus'):
         query['campaignStatus'] = query_params['campaignStatus']
+    # E5: `status` query param maps to campaignStatus (same terminal field the
+    # frontend uses for campaign stage filtering).
+    if query_params.get('status'):
+        query['campaignStatus'] = query_params['status']
     if query_params.get('companyId'):
         cid = to_object_id(query_params['companyId'])
         if cid:
@@ -178,8 +314,20 @@ async def get_outreach_records(query_params: dict = None):
     limit = int(query_params.get('limit', 50))
     skip = (page - 1) * limit
 
+    # E5: allowlist-driven sorting — no arbitrary field injection.
+    allowed_sort_fields = {
+        'updatedAt', 'createdAt', 'companyName', 'contactName',
+        'recipientEmail', 'emailSubject', 'replyStatus', 'campaignStatus',
+        'lastContactedAt'
+    }
+    sort_by = query_params.get('sortBy') or 'updatedAt'
+    if sort_by not in allowed_sort_fields:
+        sort_by = 'updatedAt'
+    sort_dir = (query_params.get('sortDir') or 'desc').lower()
+    sort_order = 1 if sort_dir == 'asc' else -1
+
     total = await db.outreachrecords.count_documents(query)
-    cursor = db.outreachrecords.find(query).sort("updatedAt", -1).skip(skip).limit(limit)
+    cursor = db.outreachrecords.find(query).sort(sort_by, sort_order).skip(skip).limit(limit)
     records = await cursor.to_list(length=limit)
 
     return {
@@ -198,7 +346,7 @@ async def update_reply_status(record_id: str, reply_status: str):
     if not rid:
         raise HTTPException(status_code=400, detail="Invalid record ID")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     update_data = {
         "replyStatus": reply_status,
         "updatedAt": now
@@ -211,16 +359,36 @@ async def update_reply_status(record_id: str, reply_status: str):
     updated = await db.outreachrecords.find_one({"_id": rid})
     if not updated:
         raise HTTPException(status_code=404, detail="Record not found")
+    if reply_status == 'REPLIED':
+        # FIX 2 (requirement 8): a reply halts every pending follow-up. Armed
+        # follow-up messages are cancelled so they can never auto-dispatch, and
+        # the record's pending follow-ups are marked CANCELLED.
+        await cancel_pending_followups(
+            updated.get("companyId"), updated.get("recipientEmail"), reason="prospect_replied"
+        )
+        updated = await db.outreachrecords.find_one({"_id": rid})
     return serialize_doc(updated)
 
 async def get_outreach_stats():
     db = get_db()
-    total = await db.outreachrecords.count_documents({})
-    initial_sent = await db.outreachrecords.count_documents({"initialEmail.status": "SENT"})
-    f1_sent = await db.outreachrecords.count_documents({"followUp1.status": "SENT"})
-    f2_sent = await db.outreachrecords.count_documents({"followUp2.status": "SENT"})
-    replied = await db.outreachrecords.count_documents({"replyStatus": "REPLIED"})
-    no_reply = await db.outreachrecords.count_documents({"replyStatus": "NO_REPLY"})
+    # E9: production delivery stats must never count sandbox / test sends.
+    real_only = {"isTestSend": {"$ne": True}}
+    total = await db.outreachrecords.count_documents(real_only)
+    initial_sent = await db.outreachrecords.count_documents({"initialEmail.status": "SENT", **real_only})
+    f1_sent = await db.outreachrecords.count_documents({"followUp1.status": "SENT", **real_only})
+    f2_sent = await db.outreachrecords.count_documents({"followUp2.status": "SENT", **real_only})
+    replied = await db.outreachrecords.count_documents({"replyStatus": "REPLIED", **real_only})
+    no_reply = await db.outreachrecords.count_documents({"replyStatus": "NO_REPLY", **real_only})
+
+    # FIX 1: "Follow-ups Pending" = follow-ups that are armed (status PENDING with
+    # a scheduledAt) and still awaiting dispatch. Unscheduled PENDING follow-ups
+    # (an inactive sequence) are intentionally not counted.
+    f1_pending = await db.outreachrecords.count_documents(
+        {"followUp1.status": "PENDING", "followUp1.scheduledAt": {"$ne": None}, **real_only}
+    )
+    f2_pending = await db.outreachrecords.count_documents(
+        {"followUp2.status": "PENDING", "followUp2.scheduledAt": {"$ne": None}, **real_only}
+    )
 
     reply_rate = round((replied / initial_sent * 100), 1) if initial_sent > 0 else 0
 
@@ -229,6 +397,7 @@ async def get_outreach_stats():
         "initialSent": initial_sent,
         "followUp1Sent": f1_sent,
         "followUp2Sent": f2_sent,
+        "followUpsPending": f1_pending + f2_pending,
         "totalDispatched": initial_sent + f1_sent + f2_sent,
         "replied": replied,
         "noReply": no_reply,
@@ -294,5 +463,5 @@ async def generate_outreach_excel_buffer(query_params: dict = None):
     wb.save(buf)
     excel_bytes = buf.getvalue()
 
-    filename = f"outreach_report_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename = f"outreach_report_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
     return {"buffer": excel_bytes, "filename": filename}

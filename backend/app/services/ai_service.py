@@ -36,6 +36,301 @@ TKSR_SERVICES = [
     }
 ]
 
+# ---------------------------------------------------------------------------
+# Canonical TKSR signature — used on every TKSR-generated email.
+# ---------------------------------------------------------------------------
+TKSR_SIGNER_NAME = "Nagendra Singh"
+TKSR_SIGNER_COMPANY = "TKSR Product Services"
+TKSR_SIGNER_WEBSITE = "https://tksrproductservices.com/"
+TKSR_SIGNER_EMAIL = "info@tksrproductservices.com"
+
+TKSR_SIGNATURE_HTML = (
+    "Best regards,<br/><strong>Nagendra Singh</strong><br/>"
+    "TKSR Product Services<br/>"
+    '<a href="https://tksrproductservices.com/">https://tksrproductservices.com/</a><br/>'
+    '<a href="mailto:info@tksrproductservices.com">info@tksrproductservices.com</a>'
+)
+TKSR_SIGNATURE_TEXT = (
+    "Best regards,\n"
+    "Nagendra Singh\n"
+    "TKSR Product Services\n"
+    "https://tksrproductservices.com/\n"
+    "info@tksrproductservices.com"
+)
+
+# Per-service copy blocks used by the deterministic builders below.
+TKSR_SERVICE_DETAILS = {
+    'AI Strategy Consulting': {
+        'serviceName': 'AI Strategy Consulting',
+        'painPoint': 'prioritizing high-ROI AI initiatives and aligning technology investments with measurable business outcomes',
+        'solution': 'We help leadership teams audit current capabilities, uncover high-impact use cases, and build an actionable, step-by-step AI implementation roadmap tailored to your company.',
+        'actionPrompt': 'explore whether an AI Strategy roadmap could accelerate your current initiatives'
+    },
+    'AI Readiness and Opportunity Assessments': {
+        'serviceName': 'AI Readiness and Opportunity Assessments',
+        'painPoint': 'evaluating data infrastructure and workflow maturity before committing significant capital to AI projects',
+        'solution': 'Our AI Readiness Assessment evaluates your systems, team workflows, and compliance constraints to identify low-risk, high-impact opportunities with zero disruption to active operations.',
+        'actionPrompt': 'review where an initial AI Readiness audit could uncover quick-win efficiencies'
+    },
+    'AI & Automation Workshops': {
+        'serviceName': 'AI & Automation Workshops',
+        'painPoint': 'bridging the gap between conceptual AI ideas and working production automations',
+        'solution': 'Through structured, hands-on workshops, we partner with your engineering and operations teams to ideate, prototype, and build production-ready automation workflows in days.',
+        'actionPrompt': 'discuss a tailored workshop session for your technical and operations teams'
+    },
+    'AI Training': {
+        'serviceName': 'AI Training',
+        'painPoint': 'enabling internal teams to confidently and safely utilize Generative AI and LLM tools',
+        'solution': 'We provide practical, role-specific training courses that empower your staff with hands-on prompt engineering, workflow automation tools, and safety guardrails.',
+        'actionPrompt': 'discuss tailored upskilling tracks for your team'
+    },
+    'AI Governance and Responsible AI': {
+        'serviceName': 'AI Governance and Responsible AI',
+        'painPoint': 'ensuring compliance, data privacy, and security guardrails as AI systems scale',
+        'solution': 'We design enterprise AI governance frameworks, establish audit trails, and implement safety policies so your organization can deploy AI with complete accountability and regulatory confidence.',
+        'actionPrompt': 'explore how our AI Governance framework can safeguard your scaling systems'
+    },
+    'AI Data Strategy': {
+        'serviceName': 'AI Data Strategy',
+        'painPoint': 'structuring disparate data pipelines and vector retrieval architectures for reliable AI models',
+        'solution': 'We help engineering organizations modernize their data architecture, RAG pipelines, and vector databases to ensure clean, high-precision data foundations for enterprise AI.',
+        'actionPrompt': 'explore how an optimized AI Data Architecture could enhance your model performance'
+    }
+}
+
+_SIGNOFF_MARKERS = (
+    "best regards", "kind regards", "warm regards", "regards,",
+    "sincerely,", "thanks,", "thank you,", "cheers,",
+)
+
+
+def sanitize_evidence(evidence) -> str:
+    """Normalize the persisted Evidence field for embedding in generated copy.
+
+    Returns '' when the field is missing, empty, a literal placeholder
+    ("None", "N/A", "-", ...) or unusable. Never fabricates content.
+    """
+    if not evidence:
+        return ""
+    clean = str(evidence).strip().strip('"\'“”‘’').strip()
+    if clean.lower() in ("none", "n/a", "na", "null", "-", "--"):
+        return ""
+    if len(clean) > 320:
+        clean = clean[:317].rstrip() + "..."
+    return clean
+
+
+def _embed(text: str) -> str:
+    """Lowercase the first character so the phrase reads mid-sentence."""
+    if not text:
+        return ""
+    return text[0].lower() + text[1:] if len(text) > 1 else text.lower()
+
+
+def _strip_signoff(content) -> str:
+    """Remove any trailing salutation block so the canonical TKSR signature is
+    the only sign-off in the email body."""
+    if not content:
+        return ""
+    lowered = content.lower()
+    cut = -1
+    for marker in _SIGNOFF_MARKERS:
+        idx = lowered.rfind(marker)
+        if idx != -1 and idx > len(content) * 0.5 and idx > cut:
+            cut = idx
+    if cut > 0:
+        return content[:cut].rstrip()
+    return content.strip()
+
+
+def apply_tksr_signature(body_html, body_text):
+    """Normalize both HTML and plain-text bodies to end with the canonical TKSR
+    signature block (replacing whatever sign-off an LLM added)."""
+    html = _strip_signoff(body_html or "").rstrip()
+    text = _strip_signoff(body_text or "").rstrip()
+    if html:
+        if not html.endswith("</p>"):
+            html += "</p>"
+        signed_html = html + f"<p>{TKSR_SIGNATURE_HTML}</p>"
+    else:
+        signed_html = f"<p>{TKSR_SIGNATURE_HTML}</p>"
+    signed_text = (text + "\n\n" + TKSR_SIGNATURE_TEXT) if text else TKSR_SIGNATURE_TEXT
+    return signed_html, signed_text
+
+
+def _first_name(name) -> str:
+    if not name:
+        return ""
+    parts = str(name).strip().split()
+    return parts[0] if parts else ""
+
+
+def _is_inbox_address(email) -> bool:
+    e = (email or "").lower()
+    return any(e.startswith(f"{p}@") for p in ("support", "contact", "info", "sales", "hello", "help"))
+
+
+def _service_description(service: str) -> str:
+    for s in TKSR_SERVICES:
+        if s['id'] == service:
+            return s.get('description', '')
+    details = TKSR_SERVICE_DETAILS.get(service)
+    return details.get('solution', '') if details else ''
+
+
+def build_primary_email(company, contact=None, sender=None, service=None, tone='conversational'):
+    """Deterministic, evidence-based Step 1 (primary) outreach email.
+
+    Uses ONLY the persisted Evidence and Recommended Service for
+    personalization. When evidence is missing or insufficient it silently
+    produces a conservative template — nothing is ever invented (no metrics,
+    case studies, initiatives, or AI-adoption claims).
+    """
+    company_name = (company.get('companyName') or '').strip()
+    evidence = sanitize_evidence(company.get('evidence'))
+    service = (service or company.get('recommendedService') or '').strip()
+    if not service:
+        service = 'AI Strategy Consulting'
+
+    email = (contact or {}).get('email') or ''
+    is_inbox = _is_inbox_address(email)
+    first = _first_name((contact or {}).get('name') or company.get('contactName'))
+
+    if is_inbox:
+        greeting = f"Hi {company_name} Team," if company_name else "Hello,"
+    elif first:
+        greeting = f"Hi {first},"
+    else:
+        greeting = "Hello,"
+
+    service_desc = _service_description(service)
+    if evidence:
+        ev = _embed(evidence)
+        observation = f"I was looking into {company_name} and noticed that {ev}."
+        opportunity = (
+            f"Work like that often raises a practical question: where AI and automation "
+            f"can create the most value without disrupting what is already working."
+        )
+    else:
+        observation = f"I was researching {company_name} and wanted to share a brief idea."
+        opportunity = (
+            "Many growing teams are asking where AI and automation can deliver the "
+            "most value with the least disruption."
+        )
+
+    value = (
+        f"At TKSR Product Services, we help teams plan and adopt {service} in a "
+        f"practical, step-by-step way. {service_desc}"
+        if service_desc else
+        f"At TKSR Product Services, we help teams plan and adopt {service} in a "
+        f"practical, step-by-step way."
+    )
+    cta = "If a short conversation would be useful, I would be happy to find 15 minutes this week — no obligation."
+
+    subject = f"Quick note on {service} for {company_name}"
+
+    body_text = (
+        f"{greeting}\n\n{observation}\n\n{opportunity} {value}\n\n{cta}\n\n{TKSR_SIGNATURE_TEXT}"
+    )
+    body_html = (
+        f"<p>{greeting}</p><p>{observation}</p><p>{opportunity} {value}</p><p>{cta}</p>"
+        f"<p>{TKSR_SIGNATURE_HTML}</p>"
+    )
+
+    evidence_short = evidence[:120].rstrip() if evidence else ''
+    if evidence and first and not is_inbox:
+        linkedin_note = (
+            f"Hi {first}, I'm Nagendra from TKSR Product Services. I came across "
+            f"{company_name} and noticed {_embed(evidence_short)}. Would connecting be useful?"
+        )
+    elif not is_inbox:
+        linkedin_note = (
+            f"Hi {first}, I'm Nagendra from TKSR Product Services. I came across "
+            f"{company_name} and wanted to share a quick idea on {service}. Open to connecting?"
+        )
+    else:
+        linkedin_note = (
+            f"Hi {company_name} Team, I'm Nagendra from TKSR Product Services. "
+            f"Would connecting be useful? Happy to share a brief note on {service}."
+        )
+    linkedin_inmail = (
+        f"Hi {first or (company_name or 'there')},\n\n{observation}\n\n{value}\n\n{cta}\n\n"
+        "Best regards,\nNagendra Singh\nTKSR Product Services"
+    )
+
+    return {
+        "subject": subject,
+        "bodyText": body_text,
+        "bodyHtml": body_html,
+        "linkedinNote": linkedin_note[:300],
+        "linkedinInmail": linkedin_inmail,
+    }
+
+
+def build_followup_email(step, company, contact=None, sender=None, service=None, evidence='', tone='conversational'):
+    """Deterministic Step 2 / Step 3 follow-up copy.
+
+    Copy stays purpose-specific (Step 2 = practical value, Step 3 = low-friction
+    closing) and is never a copy of the Step 1 body. Only the Evidence + service
+    are referenced; nothing is invented.
+    """
+    company_name = (company.get('companyName') or '').strip()
+    service = (service or '').strip() or 'AI Strategy Consulting'
+    evidence = sanitize_evidence(evidence)
+    first = _first_name((contact or {}).get('name') or company.get('contactName'))
+    is_inbox = _is_inbox_address((contact or {}).get('email'))
+    if is_inbox:
+        greeting = f"Hi {company_name} Team," if company_name else "Hello,"
+    elif first:
+        greeting = f"Hi {first},"
+    else:
+        greeting = "Hello,"
+
+    if step == 2:
+        subject = f"Re: {service} for {company_name}"
+        if evidence:
+            ref = f"Following up on my earlier note about your work on {_embed(evidence)} and how it connects with {service}."
+        else:
+            ref = f"Following up on my earlier note regarding {service} for {company_name}."
+        para = (
+            f"Teams in a similar position often find it useful to look at where AI and automation "
+            f"can remove friction without disrupting operations. At TKSR Product Services we "
+            f"specialise in {service} — a practical, step-by-step path from assessment to adoption."
+        )
+        cta = "Would a 10-minute call on Thursday or Friday be useful?"
+    else:
+        subject = f"Closing the loop: {service} for {company_name}"
+        if evidence:
+            ref = f"I know schedules are demanding. As you continue your work on {_embed(evidence)}, I wanted to send one final note."
+        else:
+            ref = f"I know schedules can be hectic, so I wanted to send one final note regarding {service}."
+        para = (
+            f"If you are currently evaluating AI and automation initiatives at {company_name}, "
+            f"we would be glad to share a tailored {service} briefing whenever the timing is right."
+        )
+        cta = "If now is not the best time, feel free to keep us in mind for future initiatives."
+
+    body_text = f"{greeting}\n\n{ref}\n\n{para}\n\n{cta}\n\n{TKSR_SIGNATURE_TEXT}"
+    body_html = (
+        f"<p>{greeting}</p><p>{ref}</p><p>{para}</p><p>{cta}</p><p>{TKSR_SIGNATURE_HTML}</p>"
+    )
+    linkedin_note = (
+        f"Hi {first or (company_name or 'there')}, following up on my earlier note regarding "
+        f"{service} for {company_name}."
+    )
+    linkedin_inmail = (
+        f"Hi {first or (company_name or 'there')},\n\n{ref}\n\n{para}\n\n{cta}\n\n"
+        "Best regards,\nNagendra Singh\nTKSR Product Services"
+    )
+    return {
+        "subject": subject,
+        "bodyText": body_text,
+        "bodyHtml": body_html,
+        "linkedinNote": linkedin_note[:300],
+        "linkedinInmail": linkedin_inmail,
+    }
+
+
 async def get_ai_config() -> dict:
     ollama_base_url = os.getenv('OLLAMA_BASE_URL', 'http://127.0.0.1:11434')
     provider = os.getenv('AI_PROVIDER', 'ollama')
@@ -184,19 +479,13 @@ def generate_fallback_research(company: dict, pages: list = None) -> dict:
     }
 
 def generate_fallback_outreach(company: dict, research: dict, contact: dict, sender: dict, angle: str = None, tone: str = None, focus_service: str = None) -> list[dict]:
-    company_name = company.get('companyName', '')
-    is_inbox = (
-        (contact and (contact.get('seniority') == 'general' or contact.get('roleCategory') == 'general')) or
-        any((contact.get('email') or '').lower().startswith(f"{prefix}@") for prefix in ['support', 'contact', 'info', 'sales', 'hello', 'help'])
-    )
+    """Deterministic 3-step sequence used when the local LLM is unavailable.
 
-    contact_first = contact.get('name', '').split(' ')[0] if contact and contact.get('name') else 'there'
-    contact_greeting = f"Hi {company_name} Team" if is_inbox else f"Hi {contact_first}"
-    contact_name = f"{company_name} Team" if is_inbox else (contact.get('name') if contact else (company.get('contactName') or 'there'))
-    contact_title = contact.get('title') if contact else ('Leadership Team' if is_inbox else 'Executive')
-    sender_name = sender.get('senderName') or 'Nagendra'
-    sender_title = sender.get('senderTitle') or 'Business Analyst'
-    my_company = sender.get('companyName') or 'TKSR Product Services'
+    Step 1 comes from `build_primary_email` (evidence + recommended service,
+    canonical TKSR signature). Steps 2/3 come from `build_followup_email` and
+    stay purpose-specific — they never reuse the Step 1 body.
+    """
+    company_name = company.get('companyName', '')
 
     company_rec = (company.get('recommendedService') or '').strip()
     if company_rec:
@@ -204,135 +493,35 @@ def generate_fallback_outreach(company: dict, research: dict, contact: dict, sen
     elif focus_service:
         selected_service = focus_service
     else:
-        role_cat = contact.get('roleCategory') if contact else ''
-        if role_cat in ('cto', 'cio'):
-            selected_service = 'AI Data Strategy'
-        elif role_cat == 'coo':
-            selected_service = 'AI Readiness and Opportunity Assessments'
-        elif role_cat == 'dept_head' and 'governance' in (contact.get('department') or '').lower():
-            selected_service = 'AI Governance and Responsible AI'
-        else:
-            selected_service = 'AI Strategy Consulting'
-
-    service_details = {
-        'AI Strategy Consulting': {
-            'serviceName': 'AI Strategy Consulting',
-            'painPoint': 'prioritizing high-ROI AI initiatives and aligning technology investments with measurable business outcomes',
-            'solution': f"We help leadership teams audit current capabilities, uncover high-impact use cases, and build an actionable, step-by-step AI implementation roadmap tailored to {company_name}.",
-            'actionPrompt': 'explore whether an AI Strategy roadmap could accelerate your current initiatives'
-        },
-        'AI Readiness and Opportunity Assessments': {
-            'serviceName': 'AI Readiness and Opportunity Assessments',
-            'painPoint': 'evaluating data infrastructure and workflow maturity before committing significant capital to AI projects',
-            'solution': 'Our AI Readiness Assessment evaluates your systems, team workflows, and compliance constraints to identify low-risk, high-impact opportunities with zero disruption to active operations.',
-            'actionPrompt': 'review where an initial AI Readiness audit could uncover quick-win efficiencies'
-        },
-        'AI & Automation Workshops': {
-            'serviceName': 'AI & Automation Workshops',
-            'painPoint': 'bridging the gap between conceptual AI ideas and working production automations',
-            'solution': 'Through structured, hands-on workshops, we partner with your engineering and operations teams to ideate, prototype, and build production-ready automation workflows in days.',
-            'actionPrompt': 'discuss a tailored workshop session for your technical and operations teams'
-        },
-        'AI Training': {
-            'serviceName': 'AI Training',
-            'painPoint': 'enabling internal teams to confidently and safely utilize Generative AI and LLM tools',
-            'solution': 'We provide practical, role-specific training courses that empower your staff with hands-on prompt engineering, workflow automation tools, and safety guardrails.',
-            'actionPrompt': 'discuss tailored upskilling tracks for your team'
-        },
-        'AI Governance and Responsible AI': {
-            'serviceName': 'AI Governance and Responsible AI',
-            'painPoint': 'ensuring compliance, data privacy, and security guardrails as AI systems scale',
-            'solution': 'We design enterprise AI governance frameworks, establish audit trails, and implement safety policies so your organization can deploy AI with complete accountability and regulatory confidence.',
-            'actionPrompt': 'explore how our AI Governance framework can safeguard your scaling systems'
-        },
-        'AI Data Strategy': {
-            'serviceName': 'AI Data Strategy',
-            'painPoint': 'structuring disparate data pipelines and vector retrieval architectures for reliable AI models',
-            'solution': 'We help engineering organizations modernize their data architecture, RAG pipelines, and vector databases to ensure clean, high-precision data foundations for enterprise AI.',
-            'actionPrompt': 'explore how an optimized AI Data Architecture could enhance your model performance'
-        }
-    }
-
-    service = service_details.get(
-        selected_service,
-        {
-            'serviceName': selected_service,
-            'painPoint': f"advancing initiatives in {selected_service}",
-            'solution': f"At {my_company}, our structured {selected_service} practice helps teams solve operational friction and achieve measurable outcomes.",
-            'actionPrompt': f"explore opportunities in {selected_service}"
-        }
-    )
+        selected_service = 'AI Strategy Consulting'
 
     company_evidence = (company.get('evidence') or '').strip()
-    if company_evidence:
-        evidence_clean = company_evidence.rstrip('.')
-        icebreaker = f"Your recent initiative around {evidence_clean} caught our attention at {my_company}."
-        f2_evidence_ref = f"Following up on my note regarding {evidence_clean} and how it connects with {service['serviceName']} for {company_name}."
-        f3_evidence_ref = f"I know schedules are demanding. As you continue your work around {evidence_clean}, I wanted to send one final note regarding {service['serviceName']}."
-    else:
-        icebreakers = research.get('icebreakers') if research else []
-        icebreaker = icebreakers[0] if icebreakers else f"I came across {company_name}'s work in {company.get('industry') or 'your sector'} and was impressed by your team's execution."
-        f2_evidence_ref = f"Following up on my note earlier this week regarding {service['serviceName']} for {company_name}."
-        f3_evidence_ref = f"I know schedules can be hectic, so I wanted to send one final note regarding {service['serviceName']}."
 
-    linkedin_note = (
-        f"Hi {company_name} Team, saw your work in {company.get('industry') or 'tech'} and wanted to connect regarding how TKSR Product Services helps companies accelerate {service['serviceName']}."
-        if is_inbox else
-        f"Hi {contact_first}, noticed your leadership as {contact_title} at {company_name}. Would love to connect and share insights on {service['serviceName']} for growing teams."
-    )
+    step1 = build_primary_email(company, contact or None, sender, selected_service, tone or 'conversational')
+    step2 = build_followup_email(2, company, contact or None, sender, selected_service, company_evidence, tone or 'conversational')
+    step3 = build_followup_email(3, company, contact or None, sender, selected_service, company_evidence, tone or 'conversational')
 
-    linkedin_inmail = f"Hi {contact_name},\n\nI've been following {company_name}'s growth in {company.get('industry') or 'your market'}.\n\nAs {contact_title}, a key operational priority is often {service['painPoint']}.\n\nAt {my_company}, our {service['serviceName']} focuses directly on this: {service['solution']}\n\nWould you be open to a brief 10-minute exchange this week to {service['actionPrompt']}?\n\nBest regards,\n{sender_name}\n{sender_title} | {my_company}"
-
-    return [
-        {
-            'step': 1,
-            'stepLabel': 'Initial Outreach',
-            'subject': f"Accelerating {service['serviceName']} at {company_name}",
+    def wrap(step, label, delay_days, content):
+        return {
+            'step': step,
+            'stepLabel': label,
+            'subject': content['subject'],
             'angle': angle or 'pain_point',
             'tone': tone or 'conversational',
             'focusService': selected_service,
             'evidenceUsed': company_evidence,
             'recommendedServiceUsed': selected_service,
-            'delayDays': 0,
-            'recipientEmail': contact.get('email') if contact else '',
-            'recipientName': contact_name,
-            'bodyHtml': f"<p>{contact_greeting},</p>\n<p>{icebreaker}</p>\n<p>As {contact_title} at <strong>{company_name}</strong>, a key strategic priority is often <strong>{service['painPoint']}</strong>.</p>\n<p>At <strong>{my_company}</strong>, we specialize in <strong>{service['serviceName']}</strong>. {service['solution']}</p>\n<p>Would you be open to a brief 10-minute introductory conversation this week to {service['actionPrompt']}?</p>\n<p>Best regards,<br/><strong>{sender_name}</strong><br/>{sender_title} | {my_company}</p>",
-            'bodyText': f"{contact_greeting},\n\n{icebreaker}\n\nAs {contact_title} at {company_name}, a key strategic priority is often {service['painPoint']}.\n\nAt {my_company}, we specialize in {service['serviceName']}. {service['solution']}\n\nWould you be open to a brief 10-minute introductory conversation this week to {service['actionPrompt']}?\n\nBest regards,\n{sender_name}\n{sender_title} | {my_company}",
-            'linkedinNote': linkedin_note,
-            'linkedinInmail': linkedin_inmail
-        },
-        {
-            'step': 2,
-            'stepLabel': 'Follow-up: Practical Implementation',
-            'subject': f"Re: Accelerating {service['serviceName']} at {company_name}",
-            'angle': 'value_prop',
-            'tone': tone or 'conversational',
-            'focusService': selected_service,
-            'evidenceUsed': company_evidence,
-            'recommendedServiceUsed': selected_service,
-            'delayDays': 3,
-            'recipientEmail': contact.get('email') if contact else '',
-            'recipientName': contact_name,
-            'bodyHtml': f"<p>{contact_greeting},</p>\n<p>{f2_evidence_ref}</p>\n<p>Organizations in your space frequently encounter challenges when moving from initial exploration to robust production workflows. Our focused approach helps teams eliminate operational bottlenecks and achieve rapid, quantifiable ROI with <strong>{service['serviceName']}</strong>.</p>\n<p>Do you have 10 minutes on Thursday or Friday to connect briefly?</p>\n<p>Best regards,<br/><strong>{sender_name}</strong><br/>{sender_title} | {my_company}</p>",
-            'bodyText': f"{contact_greeting},\n\n{f2_evidence_ref}\n\nOrganizations in your space frequently encounter challenges when moving from initial exploration to robust production workflows. Our focused approach helps teams eliminate operational bottlenecks and achieve rapid, quantifiable ROI with {service['serviceName']}.\n\nDo you have 10 minutes on Thursday or Friday to connect briefly?\n\nBest regards,\n{sender_name}\n{sender_title} | {my_company}",
-            'linkedinNote': linkedin_note,
-            'linkedinInmail': linkedin_inmail
-        },
-        {
-            'step': 3,
-            'stepLabel': 'Break-up / Low-Friction Invitation',
-            'subject': f"Closing the loop: {service['serviceName']} for {company_name}",
-            'angle': 'icebreaker',
-            'tone': tone or 'conversational',
-            'focusService': selected_service,
-            'evidenceUsed': company_evidence,
-            'recommendedServiceUsed': selected_service,
-            'delayDays': 6,
-            'recipientEmail': contact.get('email') if contact else '',
-            'recipientName': contact_name,
-            'bodyHtml': f"<p>{contact_greeting},</p>\n<p>{f3_evidence_ref}</p>\n<p>If you're currently evaluating initiatives at <strong>{company_name}</strong>, we'd be delighted to share a tailored <strong>{service['serviceName']}</strong> briefing whenever the timing is right.</p>\n<p>If now isn't the best time, feel free to keep us in mind for future initiatives.</p>\n<p>Best regards,<br/><strong>{sender_name}</strong><br/>{sender_title} | {my_company}</p>",
-            'bodyText': f"{contact_greeting},\n\n{f3_evidence_ref}\n\nIf you're currently evaluating initiatives at {company_name}, we'd be delighted to share a tailored {service['serviceName']} briefing whenever the timing is right.\n\nIf now isn't the best time, feel free to keep us in mind for future initiatives.\n\nBest regards,\n{sender_name}\n{sender_title} | {my_company}",
-            'linkedinNote': linkedin_note,
-            'linkedinInmail': linkedin_inmail
+            'delayDays': delay_days,
+            'recipientEmail': (contact or {}).get('email', '') if contact else '',
+            'recipientName': (contact or {}).get('name') if contact else (company.get('contactName') or 'Lead'),
+            'bodyHtml': content['bodyHtml'],
+            'bodyText': content['bodyText'],
+            'linkedinNote': content.get('linkedinNote', ''),
+            'linkedinInmail': content.get('linkedinInmail', '')
         }
+
+    return [
+        wrap(1, 'Initial Outreach', 0, step1),
+        wrap(2, 'Follow-up: Practical Implementation', 3, step2),
+        wrap(3, 'Break-up / Low-Friction Invitation', 6, step3),
     ]

@@ -2,7 +2,7 @@ import os
 import re
 import urllib.parse
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import httpx
 from bs4 import BeautifulSoup
 from app.services.search.search_provider import (
@@ -566,14 +566,31 @@ async def search_online_for_generated_email(candidate_email: str, person_name: s
                     has_person = name_parts and all(p in text_to_scan for p in name_parts)
                     has_company = (company_name and company_name.lower() in text_to_scan) or (clean_domain and clean_domain in text_to_scan)
                     if has_person or has_company:
+                        # D2: An appearance in the search index is a *sighting*,
+                        # not proof of publication. Classify whether the result
+                        # comes from the company's own official domain vs a
+                        # third-party/index page so callers keep verification
+                        # semantics honest (official page => EXACT_PUBLISHED,
+                        # anything else => PATTERN_GENERATED sighting only).
+                        source_url = item.get('url') or f"https://www.google.com/search?q={urllib.parse.quote(queries[idx])}"
+                        on_official = False
+                        if clean_domain:
+                            try:
+                                src_host = urllib.parse.urlparse(source_url).netloc.lower()
+                                if src_host == clean_domain or src_host.endswith(f".{clean_domain}"):
+                                    on_official = True
+                            except Exception:
+                                on_official = False
                         return {
                             'verified': True,
                             'email': normalized_cand,
                             'source': 'Public Web Search Index',
-                            'sourceUrl': item.get('url') or f"https://www.google.com/search?q={urllib.parse.quote(queries[idx])}",
+                            'sourceUrl': source_url,
                             'sourceTitle': item.get('title', ''),
                             'evidenceText': item.get('snippet') or item.get('title', ''),
-                            'confidenceScore': 98
+                            'confidenceScore': 98,
+                            'onOfficialSource': on_official,
+                            'isSighting': True
                         }
 
     return {'verified': False, 'email': normalized_cand}
@@ -598,7 +615,7 @@ async def fetch_company_public_overview(company_name: str, domain: str = '', ind
                     'sourceTitle': f"{company_name} Corporate Profile (Wikipedia)",
                     'sourceUrl': url,
                     'evidenceText': rec.get('evidence') or f"{rec.get('name')} holds the position of {rec.get('title')} at {company_name}.",
-                    'retrievedAt': datetime.utcnow().isoformat()
+                    'retrievedAt': datetime.now(timezone.utc).isoformat()
                 })
     except Exception as e:
         print(f"Authoritative lookup warning for {company_name}: {e}")
@@ -629,7 +646,7 @@ async def fetch_company_public_overview(company_name: str, domain: str = '', ind
                             'sourceTitle': item.get('title', '')[:120],
                             'sourceUrl': t_url,
                             'evidenceText': snippet[:400],
-                            'retrievedAt': datetime.utcnow().isoformat()
+                            'retrievedAt': datetime.now(timezone.utc).isoformat()
                         })
             if len(evidence_items) >= 10:
                 break

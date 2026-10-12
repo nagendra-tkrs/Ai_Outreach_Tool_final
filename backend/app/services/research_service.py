@@ -1,6 +1,6 @@
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import HTTPException
 from app.config.database import get_db
 from app.utils.bson_utils import to_object_id, serialize_doc
@@ -31,7 +31,7 @@ async def run_company_research(company_id: str):
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     await db.companies.update_one({"_id": cid}, {"$set": {"researchStatus": "researching", "updatedAt": now}})
 
     research_timeout_ms = env_int('RESEARCH_TIMEOUT_MS', 600000)
@@ -41,11 +41,11 @@ async def run_company_research(company_id: str):
         return await asyncio.wait_for(do_company_research(company), timeout=research_timeout_sec)
     except asyncio.TimeoutError:
         print(f"[RESEARCH] Research job timed out after {research_timeout_ms}ms for {company.get('companyName')}")
-        await db.companies.update_one({"_id": cid}, {"$set": {"researchStatus": "failed", "updatedAt": datetime.utcnow()}})
+        await db.companies.update_one({"_id": cid}, {"$set": {"researchStatus": "failed", "updatedAt": datetime.now(timezone.utc)}})
         raise HTTPException(status_code=504, detail=f"Research job timed out after {research_timeout_ms}ms")
     except Exception as e:
         print(f"[RESEARCH] Research failed for {company.get('companyName')}: {e}")
-        await db.companies.update_one({"_id": cid}, {"$set": {"researchStatus": "failed", "updatedAt": datetime.utcnow()}})
+        await db.companies.update_one({"_id": cid}, {"$set": {"researchStatus": "failed", "updatedAt": datetime.now(timezone.utc)}})
         raise e
 
 async def do_company_research(company: dict):
@@ -223,7 +223,7 @@ Synthesize a comprehensive JSON report with the following exact keys:
             research_data = generate_fallback_research(company, [])
             research_data['summary'] = f"{company.get('companyName')} ({company.get('industry') or 'B2B Enterprise'}). {block_reason} Intelligence synthesized from industry baseline profile."
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     research_doc = {
         'companyId': cid,
         'summary': research_data.get('summary', ''),

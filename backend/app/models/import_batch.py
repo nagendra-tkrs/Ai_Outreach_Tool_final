@@ -8,16 +8,22 @@ class ImportBatchRow(BaseModel):
     normalizedWebsite: Optional[str] = ""
     evidence: Optional[str] = ""
     recommendedService: Optional[str] = ""
+    originalService: Optional[str] = ""
+    mappedService: Optional[str] = ""
+    serviceMapped: Optional[bool] = False
     industry: Optional[str] = ""
     country: Optional[str] = ""
     contactName: Optional[str] = ""
     contactEmail: Optional[str] = ""
+    contactNames: Optional[List[str]] = Field(default_factory=list)
+    contactEmails: Optional[List[str]] = Field(default_factory=list)
     revenue: Optional[str] = ""
     employeeCount: Optional[str] = ""
     notes: Optional[str] = ""
     rowNumber: Optional[int] = 0
     status: Optional[str] = "valid"
     validationErrors: Optional[List[str]] = Field(default_factory=list)
+    suggestedFix: Optional[List[str]] = Field(default_factory=list)
 
 class ImportBatch(BaseModel):
     originalFilename: str

@@ -160,8 +160,13 @@ async def test_domain_mx_does_not_imply_mailbox_verified():
     db = get_db()
     assert db is not None
 
-    # Clean up stale test data
-    await db.companies.delete_many({"normalizedWebsite": "google.com"})
+    # Clean up stale test data — scoped to THIS test's own fixture company
+    # (name AND website must both match; never a shared website-only
+    # condition that could match a real imported company).
+    await db.companies.delete_many({
+        "normalizedWebsite": "google.com",
+        "companyName": "MX Test Corp",
+    })
 
     comp_res = await db.companies.insert_one({
         "companyName": "MX Test Corp",

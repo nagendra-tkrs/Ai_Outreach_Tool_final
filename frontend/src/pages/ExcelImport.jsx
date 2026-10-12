@@ -171,6 +171,16 @@ export default function ExcelImport() {
                 </span>
               ))}
             </div>
+
+            <div className="mt-4">
+              <a
+                href="/api/import/template"
+                download
+                className="inline-flex items-center gap-1.5 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 underline decoration-dotted"
+              >
+                ⬇️ Download Import Template (.xlsx)
+              </a>
+            </div>
           </div>
 
           <div className="flex justify-end gap-3">
@@ -208,6 +218,15 @@ export default function ExcelImport() {
                 Cancel
               </button>
               <button
+                type="button"
+                onClick={() => window.open(`/api/import/${preview.batchId}/invalid-report`, '_blank')}
+                disabled={importing || !preview.summary?.invalid}
+                title="Download a .xlsx report of the rows that need fixes"
+                className="px-4 py-2 border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-xl text-xs font-bold transition-colors disabled:opacity-50 flex items-center gap-1.5"
+              >
+                ⬇️ Validation Report
+              </button>
+              <button
                 onClick={handleConfirm}
                 disabled={importing || preview.validRows === 0}
                 className="px-5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-bold shadow-md disabled:opacity-50 flex items-center gap-1.5"
@@ -230,6 +249,7 @@ export default function ExcelImport() {
                     <th className="px-4 py-3">Evidence</th>
                     <th className="px-4 py-3">Recommended Service</th>
                     <th className="px-4 py-3">Validation / Errors</th>
+                    <th className="px-4 py-3">Suggested Fix</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -248,8 +268,15 @@ export default function ExcelImport() {
                       </td>
                       <td className="px-4 py-3 text-slate-700 text-[11px]">
                         {r.recommendedService || r.data?.recommendedService ? (
-                          <span className="inline-block bg-slate-100 px-2 py-0.5 rounded text-[10px] font-medium text-slate-800">
-                            {r.recommendedService || r.data?.recommendedService}
+                          <span className="flex flex-col items-start gap-1">
+                            <span className="inline-block bg-slate-100 px-2 py-0.5 rounded text-[10px] font-medium text-slate-800">
+                              {r.recommendedService || r.data?.recommendedService}
+                            </span>
+                            {r.serviceMapped && (
+                              <span className="inline-block bg-indigo-50 text-indigo-600 border border-indigo-200 px-2 py-0.5 rounded text-[9px] font-semibold">
+                                ← mapped from “{r.originalService}”
+                              </span>
+                            )}
                           </span>
                         ) : (
                           <span className="text-slate-400 italic">None</span>
@@ -262,6 +289,15 @@ export default function ExcelImport() {
                           </span>
                         ) : (
                           <span className="text-emerald-600 font-medium">Pass</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-slate-500 text-[11px]">
+                        {r.suggestedFix && r.suggestedFix.length > 0 ? (
+                          <span className="text-amber-700 font-medium">
+                            {r.suggestedFix.join(', ')}
+                          </span>
+                        ) : (
+                          <span className="text-slate-300 italic">—</span>
                         )}
                       </td>
                     </tr>

@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -23,6 +24,33 @@ def sanitize_smtp_error(error_msg: str, secret: str = "") -> str:
     if secret and secret in cleaned:
         cleaned = cleaned.replace(secret, "********")
     return cleaned
+
+
+def rewrite_tracking_links(body_html: str, message_id: str, base_url: str) -> str:
+    """E7: Rewrite every http(s) <a href> in the outgoing HTML so clicks are
+    recorded by GET /api/track/click/{message_id}?url=<original>. The original
+    URL is preserved as a query parameter and validated (http/https only) by
+    the tracking endpoint before the redirect, so no link clicking is lost and
+    the tracking pixel route is the only place a click count is incremented.
+
+    Only rewrites hrefs that are already absolute http(s) URLs; mailto:, #,
+    relative links and the tracking pixel itself are left untouched.
+    """
+    import urllib.parse as _urlparse
+
+    if not body_html or not message_id or not base_url:
+        return body_html or ""
+
+    def _rewrite(match: "re.Match") -> str:
+        href = match.group(1)
+        stripped = (href or "").strip()
+        parsed = _urlparse.urlparse(stripped)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            tracked = f"{base_url.rstrip('/')}/api/track/click/{message_id}?url={_urlparse.quote(stripped, safe='')}"
+            return f'href="{tracked}"'
+        return f'href="{stripped}"'
+
+    return re.sub(r'href="([^"]*)"', _rewrite, body_html)
 
 
 async def get_smtp_config(custom_config: dict = None) -> dict:
@@ -178,6 +206,14 @@ async def send_outreach_email(message_id: str, send_options: dict = None):
     if send_options is None:
         send_options = {}
 
+    from app.services.send_guard import (
+        assert_not_suppressed,
+        assert_send_limits,
+        validate_recipient_email,
+        is_message_quarantined,
+        assert_domain_match_if_enforced,
+    )
+
     db = get_db()
     mid = to_object_id(message_id)
     if not mid:
@@ -187,19 +223,68 @@ async def send_outreach_email(message_id: str, send_options: dict = None):
     if not message:
         raise HTTPException(status_code=404, detail="Outreach message not found")
 
+    # E3: Duplicate-send protection — a message that already went out must
+    # never be re-sent, even if the scheduler or the UI triggers it again.
+    if message.get('status') == 'sent':
+        raise HTTPException(
+            status_code=409,
+            detail="This message has already been sent. Duplicate sends are blocked."
+        )
+
+    # Q4: quarantine hard-stop at the FINAL send boundary — any message that is
+    # quarantined (by flag, active quarantine dict, or reason) is never sent
+    # through any entry point (manual send route, scheduler dispatch, or any
+    # future caller). This guard runs before any status mutation or SMTP activity,
+    # so a blocked message stays exactly as it is and remains quarantined.
+    if is_message_quarantined(message):
+        raise HTTPException(
+            status_code=409,
+            detail="This message is quarantined and cannot be sent. It remains "
+                   "quarantined pending review."
+        )
+
     target_email = send_options.get('recipientEmail') or message.get('recipientEmail')
     if not target_email:
         raise HTTPException(status_code=400, detail="Recipient email address is required")
 
+    # Domain mismatch check if ENFORCE_RECIPIENT_DOMAIN_MATCH is enabled
+    company = await db.companies.find_one({"_id": message.get("companyId")}) if message.get("companyId") else None
+    if company:
+        assert_domain_match_if_enforced(target_email, company.get("website", ""))
+
+    # E8: recipient email syntax validation before any dispatch attempt
+    if not validate_recipient_email(target_email):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid recipient email address format: {target_email}"
+        )
+
     cc_list = send_options.get('ccRecipients', message.get('ccRecipients', []))
     bcc_list = send_options.get('bccRecipients', message.get('bccRecipients', []))
+    if isinstance(cc_list, str):
+        cc_list = [x for x in cc_list.split(',') if x.strip()]
+    if isinstance(bcc_list, str):
+        bcc_list = [x for x in bcc_list.split(',') if x.strip()]
+
+    # E4: Suppression / opt-out — block before any dispatch, and reject CC/BCC
+    # as well so a suppressed recipient cannot receive outreach via cc.
+    await assert_not_suppressed(target_email, cc_list)
+
+    smtp_cfg = await get_smtp_config()
+
+    # E3: daily + per-domain limits (test/sandbox sends are exempt by design,
+    # so an automated test suite can never consume production quota).
+    await assert_send_limits(target_email, is_test=smtp_cfg.get('isTest', False))
 
     await db.outreachmessages.update_one({"_id": mid}, {"$set": {"status": "sending", "error": ""}})
 
     try:
-        smtp_cfg = await get_smtp_config()
         base_url = os.getenv('API_BASE_URL', f"http://localhost:{os.getenv('PORT', 5000)}")
         tracking_pixel = f'<img src="{base_url}/api/track/open/{message_id}.png" width="1" height="1" style="display:none !important;" alt="" />'
+        unsubscribe_url = f"{base_url}/api/track/unsubscribe/{message_id}"
+        # E7: rewrite outbound links through the click-tracking endpoint so
+        # candidate clicks are recorded; non-http(s) links untouched.
+        outgoing_html = rewrite_tracking_links(message.get('bodyHtml', ''), message_id, base_url)
 
         email_message_id = f"<{uuid.uuid4()}@{smtp_cfg['host'] or 'local'}>"
         msg = EmailMessage()
@@ -211,10 +296,14 @@ async def send_outreach_email(message_id: str, send_options: dict = None):
         if bcc_list:
             msg['Bcc'] = ", ".join(bcc_list) if isinstance(bcc_list, list) else bcc_list
         msg['Subject'] = message.get('subject', '')
+        # E4: one-click List-Unsubscribe header pointing to the app's own
+        # unsubscribe endpoint (registered suppression applies globally).
+        msg['List-Unsubscribe'] = f"<{unsubscribe_url}>"
+        msg['List-Unsubscribe-Post'] = "List-Unsubscribe=One-Click"
         msg.set_content(message.get('bodyText', ''))
         msg.add_alternative(f"""
           <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.6; color: #1f2937;">
-            {message.get('bodyHtml', '')}
+            {outgoing_html}
             {tracking_pixel}
           </div>
         """, subtype='html')
@@ -231,6 +320,7 @@ async def send_outreach_email(message_id: str, send_options: dict = None):
             )
 
         now = datetime.now(timezone.utc)
+        is_test_send = bool(smtp_cfg.get('isTest', False))
         await db.outreachmessages.update_one(
             {"_id": mid},
             {"$set": {
@@ -240,6 +330,7 @@ async def send_outreach_email(message_id: str, send_options: dict = None):
                 "ccRecipients": cc_list,
                 "bccRecipients": bcc_list,
                 "messageId": email_message_id,
+                "isTestSend": is_test_send,
                 "updatedAt": now
             }}
         )
@@ -250,7 +341,8 @@ async def send_outreach_email(message_id: str, send_options: dict = None):
             'recipientEmail': target_email,
             'ccRecipients': cc_list,
             'bccRecipients': bcc_list,
-            'messageId': email_message_id
+            'messageId': email_message_id,
+            'isTestSend': is_test_send
         }
         await record_email_dispatch(message, dispatch_result)
 
@@ -269,7 +361,8 @@ async def send_outreach_email(message_id: str, send_options: dict = None):
             'sentAt': now,
             'recipientEmail': target_email,
             'ccRecipients': cc_list,
-            'bccRecipients': bcc_list
+            'bccRecipients': bcc_list,
+            'isTestSend': bool(smtp_cfg.get('isTest', False))
         }
         await record_email_dispatch(message, dispatch_result)
         raise e

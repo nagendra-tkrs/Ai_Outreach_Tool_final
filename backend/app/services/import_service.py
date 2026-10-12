@@ -1,8 +1,37 @@
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import HTTPException
 from app.config.database import get_db
 from app.utils.bson_utils import to_object_id, serialize_doc
+from app.utils.validators import normalize_website
+
+
+def _existing_company_query(row: dict) -> dict:
+    """Build a query that matches a company regardless of how its website was stored."""
+    keys = set()
+    nw = (row.get("normalizedWebsite") or "").strip()
+    if nw:
+        keys.add(nw)
+        keys.add("https://" + nw)
+        keys.add("http://" + nw)
+    raw_website = (row.get("website") or "").strip().lower()
+    if raw_website:
+        keys.add(raw_website)
+        keys.add(raw_website.rstrip("/"))
+        keys.add(normalize_website(raw_website))
+    official = (row.get("officialDomain") or "").strip().lower()
+    if official:
+        keys.add(official)
+
+    keys = [k for k in keys if k]
+    if not keys:
+        return {}
+
+    return {"$or": [
+        {"normalizedWebsite": {"$in": keys}},
+        {"website": {"$in": keys}},
+        {"officialDomain": {"$in": keys}},
+    ]}
 
 async def confirm_import(batch_id: str):
     db = get_db()
@@ -26,10 +55,10 @@ async def confirm_import(batch_id: str):
 
     imported = []
     skipped = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     for row in valid_rows:
-        existing = await db.companies.find_one({"normalizedWebsite": row["normalizedWebsite"]})
+        existing = await db.companies.find_one(_existing_company_query(row))
         if existing:
             skipped_row = dict(row)
             skipped_row["skipReason"] = "Already exists in database"
@@ -42,10 +71,14 @@ async def confirm_import(batch_id: str):
             "normalizedWebsite": row["normalizedWebsite"],
             "evidence": row.get("evidence", ""),
             "recommendedService": row.get("recommendedService", ""),
+            "originalService": row.get("originalService", ""),
+            "mappedService": row.get("mappedService", ""),
             "industry": row.get("industry", ""),
             "country": row.get("country", ""),
             "contactName": row.get("contactName", ""),
             "contactEmail": row.get("contactEmail", ""),
+            "contactNames": row.get("contactNames", []),
+            "contactEmails": row.get("contactEmails", []),
             "revenue": row.get("revenue", ""),
             "employeeCount": row.get("employeeCount", ""),
             "notes": row.get("notes", ""),

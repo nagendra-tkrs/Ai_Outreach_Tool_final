@@ -138,7 +138,7 @@ async def execute_public_web_search(query: str, options: dict = None) -> dict:
             'configured': True,
             'error': 'SEARCH_CIRCUIT_OPEN',
             'state': 'SEARCH_UNAVAILABLE',
-            'retrievedAt': datetime.utcnow().isoformat()
+            'retrievedAt': datetime.now(timezone.utc).isoformat()
         }
 
     timeout_ms = options.get('timeoutMs') or SEARCH_TIMEOUT_MS
@@ -191,7 +191,7 @@ async def execute_public_web_search(query: str, options: dict = None) -> dict:
                         'source': 'duckduckgo',
                         'configured': True,
                         'state': 'OK',
-                        'retrievedAt': datetime.utcnow().isoformat()
+                        'retrievedAt': datetime.now(timezone.utc).isoformat()
                     }
 
                 last_error = 'DuckDuckGo returned no results'

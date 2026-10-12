@@ -29,8 +29,11 @@ class Contact(BaseModel):
     emailSource: Optional[str] = "Official Leadership Page"
     emailSourceUrl: Optional[str] = ""
     emailVerificationMethod: Optional[str] = "None"
+    emailVerificationState: Optional[str] = "UNVERIFIED"
     mxStatus: Optional[str] = "UNKNOWN"
     mxProvider: Optional[str] = ""
+    mxState: Optional[str] = "UNKNOWN"
+    hasMxRecords: Optional[bool] = None
     patternUsed: Optional[str] = "first.last"
     emailPattern: Optional[str] = "first.last"
     patternExamples: Optional[List[str]] = Field(default_factory=list)

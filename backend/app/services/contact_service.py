@@ -45,8 +45,6 @@ def categorize_role(title: str = '', department: str = '') -> dict:
         return {'roleCategory': 'president', 'seniority': 'executive', 'cleanTitle': 'President'}
     if re.search(r'\b(managing director|md)\b', t, re.I):
         return {'roleCategory': 'managing_director', 'seniority': 'executive', 'cleanTitle': 'Managing Director'}
-    if re.search(r'\b(director)\b', t, re.I) and not re.search(r'\b(managing director|md)\b', t, re.I):
-        return {'roleCategory': 'director', 'seniority': 'director', 'cleanTitle': title or 'Director'}
     if re.search(r'\b(coo|chief operating officer|chief operations officer)\b', t, re.I):
         return {'roleCategory': 'coo', 'seniority': 'executive', 'cleanTitle': 'Chief Operating Officer'}
     if re.search(r'\b(cfo|chief financial officer|chief finance officer|head of finance)\b', t, re.I):
@@ -57,22 +55,43 @@ def categorize_role(title: str = '', department: str = '') -> dict:
         return {'roleCategory': 'cio', 'seniority': 'executive', 'cleanTitle': 'Chief Information Officer'}
     if re.search(r'\b(cdo|chief digital officer|chief data officer)\b', t, re.I):
         return {'roleCategory': 'cdo', 'seniority': 'executive', 'cleanTitle': 'Chief Digital Officer'}
-    if re.search(r'\b(head of ai|director of ai|vp of ai|head of machine learning|lead ai architect|chief ai officer|caio)\b', t, re.I) or 'ai' in d or 'machine learning' in d:
+
+    # D1: Specialized functional/executive roles MUST be classified BEFORE the
+    # generic "director" / "vice president" rules, otherwise roles such as
+    # "Director of AI", "Director of Data", "VP of Engineering", "VP of Sales"
+    # would be downgraded to the generic categories.
+    if re.search(r'\b(head of ai|director of ai|vp of ai|vice president of ai|head of machine learning|lead ai architect|chief ai officer|caio)\b', t, re.I) or 'ai' in d or 'machine learning' in d:
         return {'roleCategory': 'head_of_ai', 'seniority': 'director', 'cleanTitle': 'Head of AI'}
-    if re.search(r'\b(head of data|director of data|vp of data|chief data officer|head of analytics|data engineering lead)\b', t, re.I) or 'data' in d:
+    if re.search(r'\b(head of data|director of data|vp of data|vice president of data|head of analytics|head of data science|data engineering lead|head of bi)\b', t, re.I) or 'data' in d or 'analytics' in d:
         return {'roleCategory': 'head_of_data', 'seniority': 'director', 'cleanTitle': 'Head of Data'}
-    if re.search(r'\b(vp of engineering|vice president of engineering|head of engineering|director of engineering|vp of technology|head of technology)\b', t, re.I):
+    if re.search(r'\b(vp of engineering|vice president of engineering|head of engineering|director of engineering|vp of technology|vice president of technology|director of technology|head of technology|head of it|director of it|vp of it|head of information technology|chief information officer)\b', t, re.I) or 'technology' in d or 'engineering' in d or 'it' in d:
         return {'roleCategory': 'head_of_technology', 'seniority': 'director', 'cleanTitle': 'Head of Technology'}
-    if re.search(r'\b(head of operations|director of operations|vp of operations)\b', t, re.I):
-        return {'roleCategory': 'head_of_operations', 'seniority': 'director', 'cleanTitle': 'Head of Operations'}
-    if re.search(r'\b(head of sales|director of sales|vp of sales|chief revenue officer|cro)\b', t, re.I):
+    if re.search(r'\b(head of sales|director of sales|vp of sales|vice president of sales|chief revenue officer|cro|head of revenue|director of revenue|head of business development|director of business development)\b', t, re.I) or 'sales' in d or 'business development' in d:
         return {'roleCategory': 'head_of_sales', 'seniority': 'director', 'cleanTitle': 'Head of Sales'}
-    if re.search(r'\b(head of product|director of product|vp of product|chief product officer|cpo)\b', t, re.I):
+    if re.search(r'\b(head of product|director of product|vp of product|vice president of product|chief product officer|cpo|head of product management|director of product management)\b', t, re.I) or 'product' in d:
         return {'roleCategory': 'head_of_product', 'seniority': 'director', 'cleanTitle': 'Head of Product'}
+    if re.search(r'\b(head of operations|director of operations|vp of operations|vice president of operations)\b', t, re.I) or d == 'operations':
+        return {'roleCategory': 'head_of_operations', 'seniority': 'director', 'cleanTitle': 'Head of Operations'}
+    if re.search(r'\b(head of marketing|director of marketing|vp of marketing|chief marketing officer|cmo)\b', t, re.I) or 'marketing' in d:
+        return {'roleCategory': 'head_of_marketing', 'seniority': 'director', 'cleanTitle': 'Head of Marketing'}
+    if re.search(r'\b(head of hr|director of hr|vp of hr|chief human resources officer|chief people officer|head of people)\b', t, re.I) or d in ('hr', 'human resources'):
+        return {'roleCategory': 'head_of_hr', 'seniority': 'director', 'cleanTitle': 'Head of HR'}
+    if re.search(r'\b(head of legal|general counsel|chief legal officer|director of legal)\b', t, re.I) or 'legal' in d:
+        return {'roleCategory': 'head_of_legal', 'seniority': 'director', 'cleanTitle': 'Head of Legal'}
+    if re.search(r'\b(head of finance|director of finance|vp of finance)\b', t, re.I) or d == 'finance':
+        return {'roleCategory': 'head_of_finance', 'seniority': 'director', 'cleanTitle': 'Head of Finance'}
+
+    # Generic role levels -- AFTER specialized roles (D1 precedence)
+    if re.search(r'\b(director)\b', t, re.I) and not re.search(r'\b(managing director|md)\b', t, re.I):
+        return {'roleCategory': 'director', 'seniority': 'director', 'cleanTitle': title or 'Director'}
     if re.search(r'\b(vice president|vp|executive vice president|evp|senior vice president|svp)\b', t, re.I):
         return {'roleCategory': 'vp', 'seniority': 'executive', 'cleanTitle': title or 'Vice President'}
-    if re.search(r'\b(head of|department head|director)\b', t, re.I):
+    if re.search(r'\b(head of|department head)\b', t, re.I):
         return {'roleCategory': 'dept_head', 'seniority': 'director', 'cleanTitle': title or 'Department Head'}
+    if re.search(r'\b(manager|team lead|group head|unit head)\b', t, re.I):
+        return {'roleCategory': 'manager', 'seniority': 'manager', 'cleanTitle': title or 'Manager'}
+    if re.search(r'\b(lead|senior consultant|consultant|analyst)\b', t, re.I):
+        return {'roleCategory': 'lead', 'seniority': 'staff', 'cleanTitle': title or 'Lead'}
     if re.search(r'\b(desk|inbox|support|info|sales|contact|team|general)\b', t, re.I) or 'inquiries' in t:
         return {'roleCategory': 'general', 'seniority': 'general', 'cleanTitle': title or 'Company Inbox'}
 
@@ -80,7 +99,12 @@ def categorize_role(title: str = '', department: str = '') -> dict:
 
 async def check_domain_mx(domain: str) -> dict:
     if not domain:
-        return {'mxStatus': 'UNKNOWN', 'mxProvider': '', 'hasMxRecords': False}
+        return {
+            'mxStatus': 'UNKNOWN',
+            'mxProvider': '',
+            'hasMxRecords': None,
+            'mxState': 'UNKNOWN'
+        }
 
     clean_domain = re.sub(r'^https?://', '', domain)
     clean_domain = re.sub(r'^www\.', '', clean_domain).split('/')[0].lower()
@@ -104,18 +128,49 @@ async def check_domain_mx(domain: str) -> dict:
             return {
                 'mxStatus': 'MX_ACTIVE',
                 'mxProvider': f"{provider_name} ({primary_exchange})",
-                'hasMxRecords': True
+                'hasMxRecords': True,
+                'mxState': 'YES'
             }
-        return {'mxStatus': 'MX_NOT_FOUND', 'mxProvider': 'No MX records found', 'hasMxRecords': False}
+        return {
+            'mxStatus': 'MX_NOT_FOUND',
+            'mxProvider': 'No MX records found',
+            'hasMxRecords': False,
+            'mxState': 'NO'
+        }
     except Exception:
+        # D7: DNS lookup failure / timeouts are UNKNOWN, not a proof of "no MX".
+        # Keep hasMxRecords None (unknown) so downstream scoring stays neutral.
         return {
             'mxStatus': 'MX_UNKNOWN',
             'mxProvider': 'DNS MX lookup failed or timed out',
-            'hasMxRecords': False,
+            'hasMxRecords': None,
+            'mxState': 'UNKNOWN',
             'dnsError': True
         }
 
 def evaluate_person_email_match(person_name: str = '', email: str = '', domain: str = '') -> dict:
+    # D6: Delegate to the single canonical person->email matcher so every caller
+    # shares identical nickname/middle-name/initials/hyphen/domain logic.
+    try:
+        from app.services.email_validation_service import canonical_person_email_match
+    except Exception:
+        canonical_person_email_match = None
+
+    if canonical_person_email_match is not None:
+        res = canonical_person_email_match(person_name or '', email or '', domain or '')
+        matched = bool(res.get('matched'))
+        reason = res.get('reason') or ('Email reflects person name' if matched else 'Email does not correspond to person name')
+        return {
+            'match': matched,
+            'personEmailMatch': res.get('personEmailMatch', 'true' if matched else 'false'),
+            'reason': reason,
+            'score': res.get('score', 0),
+            'pattern': res.get('pattern', 'none'),
+            'confidence': res.get('confidence', 'NONE'),
+            'domainMatched': res.get('domainMatched', True)
+        }
+
+    # Fallback (never expected): identical legacy logic preserved for safety.
     if not email or '@' not in email:
         return {'match': False, 'personEmailMatch': 'unknown', 'reason': 'No email address available to compare'}
 
@@ -177,7 +232,16 @@ def calculate_explainable_confidence(data: dict) -> dict:
     is_generic = data.get('isGeneric', False)
     is_exact = data.get('isExactPublished', False)
     is_pattern = data.get('isPatternDerived', False)
-    has_mx = data.get('hasMxRecords', True)
+    # D7: tri-state MX — do not silently default to "has MX" nor claim "no MX"
+    # when the DNS state is unknown.
+    has_mx = data.get('hasMxRecords', None)
+    mx_state = data.get('mxState')
+    if mx_state in ('YES', True, 'true'):
+        has_mx = True
+    elif mx_state in ('NO', False, 'false'):
+        has_mx = False
+    # Anything else (UNKNOWN / missing) leaves has_mx as None -> neutral. Note:
+    # mxState strings like "UNKNOWN" must NOT be coerced to False.
     match = data.get('personEmailMatch', 'true')
 
     if is_generic:
@@ -211,15 +275,17 @@ def calculate_explainable_confidence(data: dict) -> dict:
     if is_exact and match == 'true':
         score += 30
         reasoning.append('Exact professional email verified directly in source (+30)')
-    elif is_pattern and has_mx:
+    elif is_pattern and has_mx is True:
         score += 15
         reasoning.append('Company employee email format with active DNS MX (+15)')
     else:
         reasoning.append('No direct personal mailbox published (+0)')
 
-    if has_mx:
+    if has_mx is True:
         score += 10
         reasoning.append('Active corporate DNS MX mail exchange verified (+10)')
+    elif has_mx is None:
+        reasoning.append('MX availability unknown / not verified (+0, neutral)')
 
     level = 'high' if score >= 85 else ('medium' if score >= 65 else 'low')
     return {
@@ -415,7 +481,8 @@ async def resolve_decision_maker_email(name: str = '', company_name: str = '', d
             'email': '', 'emailDomain': '', 'emailStatus': 'NOT_FOUND', 'status': 'not_found',
             'confidenceScore': 0, 'sourceType': 'None', 'patternUsed': 'none', 'patternConfidence': 'none',
             'patternExamples': [], 'patternSources': [], 'verifiedAssociations': [],
-            'isExactPublished': False, 'verificationMethod': 'None'
+            'isExactPublished': False, 'verificationMethod': 'None',
+            'emailVerificationState': 'NOT_FOUND'
         }
 
     clean_domain = re.sub(r'^https?://', '', domain or '')
@@ -443,7 +510,8 @@ async def resolve_decision_maker_email(name: str = '', company_name: str = '', d
                 'patternSources': ['Official Leadership Page'],
                 'verifiedAssociations': [{'email': e.lower(), 'personName': name}],
                 'isExactPublished': True,
-                'verificationMethod': 'DIRECT_SOURCE_MATCH'
+                'verificationMethod': 'DIRECT_SOURCE_MATCH',
+                'emailVerificationState': 'EXACT_PUBLISHED'
             }
 
     # 2. Public Search for exact published email
@@ -463,7 +531,9 @@ async def resolve_decision_maker_email(name: str = '', company_name: str = '', d
             'patternSources': [direct_search.get('sourceUrl', '')],
             'verifiedAssociations': [{'email': em, 'personName': name}],
             'isExactPublished': True,
-            'verificationMethod': 'DIRECT_SOURCE_MATCH'
+            'verificationMethod': 'DIRECT_SOURCE_MATCH',
+            'emailVerificationState': 'EXACT_PUBLISHED',
+            'searchIndexSighting': True
         }
 
     # 3. Discover company pattern and generate candidate
@@ -475,20 +545,53 @@ async def resolve_decision_maker_email(name: str = '', company_name: str = '', d
         # Online verification of candidate email
         cand_verify = await search_online_for_generated_email(cand_email, name, company_name, clean_domain)
         if cand_verify.get('verified'):
+            # D2: A search-index appearance of a PATTERN-GENERATED email is a
+            # "sighting", NOT proof the address was explicitly published by an
+            # authoritative source. It must never be promoted to DIRECT_SOURCE_MATCH
+            # / isExactPublished=True, otherwise generated addresses would be
+            # silently misrepresented as verified published mailboxes.
+            #
+            # Exception: when the sighting itself is hosted on the company's
+            # official domain, the mailbox is genuinely published by the
+            # company, so EXACT_PUBLISHED is accurate there.
+            if cand_verify.get('onOfficialSource'):
+                return {
+                    'email': cand_email,
+                    'emailDomain': pattern_info.get('emailDomain') or clean_domain,
+                    'emailStatus': 'DIRECTLY_VERIFIED',
+                    'status': 'verified',
+                    'confidenceScore': cand_verify.get('confidenceScore', 96),
+                    'sourceType': 'Official Company Domain (search-confirmed)',
+                    'patternUsed': pattern_info['pattern'],
+                    'patternConfidence': pattern_info.get('patternConfidence', 'medium'),
+                    'patternExamples': pattern_info.get('examples', []),
+                    'patternSources': pattern_info.get('sources', []),
+                    'verifiedAssociations': pattern_info.get('verifiedAssociations', []),
+                    'isExactPublished': True,
+                    'verificationMethod': 'DIRECT_SOURCE_MATCH',
+                    'emailVerificationState': 'EXACT_PUBLISHED',
+                    'searchIndexSighting': True,
+                    'searchSighting': cand_verify.get('source', ''),
+                    'mailboxVerification': 'UNVERIFIED'
+                }
             return {
                 'email': cand_email,
                 'emailDomain': pattern_info.get('emailDomain') or clean_domain,
-                'emailStatus': 'DIRECTLY_VERIFIED',
-                'status': 'verified',
-                'confidenceScore': 98,
-                'sourceType': 'Public Web Search Index',
+                'emailStatus': 'PATTERN_GENERATED',
+                'status': 'pattern_derived',
+                'confidenceScore': pattern_info.get('confidence', 80),
+                'sourceType': 'Company Email Pattern Inference',
                 'patternUsed': pattern_info['pattern'],
-                'patternConfidence': pattern_info.get('patternConfidence', 'high'),
+                'patternConfidence': pattern_info.get('patternConfidence', 'medium'),
                 'patternExamples': pattern_info.get('examples', []),
                 'patternSources': pattern_info.get('sources', []),
                 'verifiedAssociations': pattern_info.get('verifiedAssociations', []),
-                'isExactPublished': True,
-                'verificationMethod': 'DIRECT_SOURCE_MATCH'
+                'isExactPublished': False,
+                'verificationMethod': 'PATTERN_INFERENCE',
+                'emailVerificationState': 'PATTERN_GENERATED',
+                'searchIndexSighting': True,
+                'searchSighting': cand_verify.get('source', ''),
+                'mailboxVerification': 'UNVERIFIED'
             }
 
         return {
@@ -504,7 +607,9 @@ async def resolve_decision_maker_email(name: str = '', company_name: str = '', d
             'patternSources': pattern_info.get('sources', []),
             'verifiedAssociations': pattern_info.get('verifiedAssociations', []),
             'isExactPublished': False,
-            'verificationMethod': 'None'
+            'verificationMethod': 'PATTERN_INFERENCE',
+            'emailVerificationState': 'PATTERN_GENERATED',
+            'mailboxVerification': 'UNVERIFIED'
         }
 
     return {
@@ -520,7 +625,9 @@ async def resolve_decision_maker_email(name: str = '', company_name: str = '', d
         'patternSources': [],
         'verifiedAssociations': [],
         'isExactPublished': False,
-        'verificationMethod': 'None'
+        'verificationMethod': 'None',
+        'emailVerificationState': 'NOT_FOUND',
+        'mailboxVerification': 'UNVERIFIED'
     }
 
 def rank_decision_makers(candidates: list = None, company: dict = None, research: dict = None) -> list[dict]:
@@ -930,17 +1037,40 @@ async def extract_contacts_from_website(company_id: str, return_diagnostics: boo
                 }}
             )
 
-    # Purge any fabricated or synthetic contacts
-    await db.contacts.delete_many({
-        "companyId": cid,
-        "$or": [
-            {"name": {"$regex": r"\s+[A-Z]$"}},
-            {"name": {"$regex": r"Leadership$", "$options": "i"}},
-            {"name": {"$regex": r"Officer$|Lead\b|Architect$", "$options": "i"}},
-            {"evidence.snippet": {"$regex": r"is verified as|Corporate leadership channel", "$options": "i"}},
-            {"evidence.personEvidence": {"$regex": r"is verified as|Corporate leadership channel", "$options": "i"}}
-        ]
-    })
+    # D8: Structured purge of fabricated/synthetic contacts (replaces the old
+    # blanket regex delete_many). A contact is removed ONLY when BOTH:
+    #   (a) it was NOT produced by this discovery run (real discovered
+    #       executives are never swept up), AND
+    #   (b) its name/evidence matches fabrication markers (placeholder initials,
+    #       role-label-as-name, or LLM filler text "is verified as" / corporate
+    #       channel boilerplate).
+    saved_names = {c.get('name') for c in saved_contacts if c.get('name')}
+    synthetic_name_pats = [
+        re.compile(r"\s+[A-Z]$"),                          # single-initial placeholder, e.g. "John D"
+        re.compile(r"Executive Officer$|Technology Officer$|Officer$", re.I),
+        re.compile(r"Lead$|Leadership$|Management$", re.I),
+        re.compile(r"Architect$", re.I),
+        re.compile(r"^Global Managing Director$", re.I),
+    ]
+    synthetic_evidence_pat = re.compile(r"is verified as|Corporate leadership channel", re.I)
+
+    existing_cursor = db.contacts.find({"companyId": cid})
+    existing_contacts = await existing_cursor.to_list(length=250)
+    purge_ids = []
+    for ex in existing_contacts:
+        ex_name = ex.get('name') or ''
+        if ex_name in saved_names:
+            continue
+        is_synth = any(p.search(ex_name) for p in synthetic_name_pats)
+        if not is_synth:
+            ev = ex.get('evidence') or {}
+            snippet = ev.get('snippet') or '' if isinstance(ev, dict) else ''
+            person_ev = ev.get('personEvidence') or '' if isinstance(ev, dict) else ''
+            is_synth = bool(synthetic_evidence_pat.search(snippet) or synthetic_evidence_pat.search(person_ev))
+        if is_synth and ex.get('_id'):
+            purge_ids.append(ex['_id'])
+    if purge_ids:
+        await db.contacts.delete_many({"_id": {"$in": purge_ids}})
 
     if db is not None:
         await db.companyresearches.update_one(
@@ -966,15 +1096,10 @@ async def get_company_contacts(company_id: str = None):
     cursor = db.contacts.find(query).sort("overallScore", -1)
     contacts = await cursor.to_list(length=100)
 
-    # Automatically extract if no contacts exist yet for this company
-    if company_id and cid and len(contacts) == 0:
-        try:
-            await extract_contacts_from_website(company_id, enable_phase2=True)
-            cursor = db.contacts.find(query).sort("overallScore", -1)
-            contacts = await cursor.to_list(length=100)
-        except Exception:
-            pass
-
+    # D4: GET /contacts is strictly read-only. Automatic extraction on read was
+    # removed because any read-only view (reports, dashboards, polling) must not
+    # trigger expensive crawls or mutate the collection. Use the explicit
+    # POST /companies/{company_id}/contacts/discover endpoint instead.
     return serialize_doc(contacts)
 
 async def create_contact(company_id: str, data: dict):
@@ -983,7 +1108,7 @@ async def create_contact(company_id: str, data: dict):
     if not cid:
         raise HTTPException(status_code=400, detail="Invalid company ID")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     doc = dict(data)
     doc['companyId'] = cid
     doc['createdAt'] = now
@@ -1003,7 +1128,7 @@ async def update_contact(contact_id: str, data: dict):
     if not cid:
         raise HTTPException(status_code=400, detail="Invalid contact ID")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     update_fields = dict(data)
     update_fields['updatedAt'] = now
 
@@ -1048,7 +1173,7 @@ async def verify_contact_email(contact_id: str):
     domain = (company.get('website') if company else '').split('/')[0]
     mx_check = await check_domain_mx(domain)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     # Domain MX is separate from individual mailbox verification
     is_exact = contact.get('isExactPublished', False) or contact.get('emailStatus') == 'EXACT_FOUND' or contact.get('email_status') == 'EXACT_FOUND'
     if not email:
@@ -1170,7 +1295,7 @@ async def apply_pattern_to_contacts(company_id: str, selected_pattern: str):
     contacts_cursor = db.contacts.find({"companyId": cid})
     contacts = await contacts_cursor.to_list(length=100)
     updated_contacts = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     for c in contacts:
         if c.get('roleCategory') == 'general' or c.get('seniority') == 'general':

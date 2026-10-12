@@ -1,6 +1,6 @@
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urljoin
 from fastapi import HTTPException
 from app.config.database import get_db
@@ -47,7 +47,7 @@ async def crawl_company(company_id: str):
     if existing_job:
         raise HTTPException(status_code=409, detail="Crawl already in progress")
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     await db.companies.update_one({"_id": cid}, {"$set": {"crawlStatus": "crawling", "updatedAt": now}})
 
     job_doc = {
@@ -120,7 +120,7 @@ async def crawl_company(company_id: str):
             async def process_item(item):
                 nonlocal pages_crawled, pages_failed, pages_blocked
                 visited.add(item['url'])
-                item_now = datetime.utcnow()
+                item_now = datetime.now(timezone.utc)
 
                 # 1. Robots.txt check
                 try:
@@ -308,7 +308,7 @@ async def crawl_company(company_id: str):
         if pages_crawled == 0:
             final_company_crawl_status = 'blocked' if pages_blocked > 0 else 'failed'
 
-        finish_now = datetime.utcnow()
+        finish_now = datetime.now(timezone.utc)
         job_status = 'completed' if pages_crawled > 0 else 'failed'
         job_error = ''
         if pages_crawled == 0:
@@ -349,7 +349,7 @@ async def crawl_company(company_id: str):
             "pagesBlocked": pages_blocked
         }
     except Exception as err:
-        finish_now = datetime.utcnow()
+        finish_now = datetime.now(timezone.utc)
         await db.researchjobs.update_one(
             {"_id": job_id},
             {"$set": {
