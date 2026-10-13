@@ -5,11 +5,11 @@ import { readFile } from 'node:fs/promises';
 import {
   applyLocalEdit,
   describeRecipientSync,
+  describeScheduleResult,
   findInvalidEmails,
   getActiveStepMessage,
   htmlToPlainText,
   isLockedMessage,
-  isQuarantined,
   isValidEmail,
   mergeServerMessages,
   resolveStepMessage,
@@ -252,7 +252,7 @@ test('regression: the save payload posts ccRecipients for unsent steps', async (
   assert.match(src, /describeRecipientSync\(sync\)/);
 });
 
-// --- quarantined-draft manual-edit workflow: address validation -------------
+// --- draft manual-edit workflow: address validation ------------------------
 
 test('isValidEmail accepts valid/blank addresses and rejects malformed ones', () => {
   assert.equal(isValidEmail('a.person+tag@sub.domain.co'), true);
@@ -288,12 +288,9 @@ test('regression: CompanyDetail blocks the save on malformed addresses before PU
   const src = await readFile(new URL('../pages/CompanyDetail.jsx', import.meta.url), 'utf8');
   assert.match(src, /findInvalidEmails\(\{/);
   assert.match(src, /Cannot save: invalid email address/);
-  // Quarantined drafts are visibly identified in the editor action bar.
-  assert.match(src, /editingMessage\.quarantined === true/);
-  assert.match(src, /Quarantined — editing allowed, sending blocked/);
 });
 
-// --- quarantined follow-up editor: sent/locked display consistency ---------
+// --- follow-up editor: sent/locked display consistency ---------------------
 
 const msg = (step, status, extra = {}) => ({
   _id: `m${step}`,
@@ -305,30 +302,22 @@ const msg = (step, status, extra = {}) => ({
   ...extra,
 });
 
-test('isQuarantined / isLockedMessage distinguish sent history from quarantined drafts', () => {
-  assert.equal(isQuarantined(null), false);
-  assert.equal(isQuarantined({}), false);
-  assert.equal(isQuarantined({ quarantined: false }), false);
-  assert.equal(isQuarantined({ quarantined: true }), true);
-
+test('isLockedMessage distinguishes sent history from drafts', () => {
   // Genuine sent history -> locked.
   assert.equal(isLockedMessage(msg(1, 'sent')), true);
-  // Quarantined draft -> NOT locked, even if a stale binding carried a
-  // non-draft status onto it.
-  assert.equal(isLockedMessage(msg(2, 'draft', { quarantined: true })), false);
-  assert.equal(isLockedMessage(msg(3, 'draft', { quarantined: true })), false);
-  assert.equal(isLockedMessage(msg(2, 'sent', { quarantined: true })), false);
-  // Ordinary draft -> not locked.
+  // Drafts -> not locked.
   assert.equal(isLockedMessage(msg(2, 'draft')), false);
+  assert.equal(isLockedMessage(msg(3, 'draft')), false);
+  // No message -> not locked.
+  assert.equal(isLockedMessage(null), false);
+  assert.equal(isLockedMessage(undefined), false);
 });
 
-test('regression: Step 2 and Step 3 select their own quarantined drafts while Step 1 remains sent', () => {
-  // Mirrors the live quarantine-20261009 documents: Step 1 sent, Steps 2/3
-  // quarantined drafts.
+test('regression: Step 2 and Step 3 select their own drafts while Step 1 remains sent', () => {
   const serverMessages = [
     msg(1, 'sent'),
-    msg(2, 'draft', { quarantined: true }),
-    msg(3, 'draft', { quarantined: true }),
+    msg(2, 'draft'),
+    msg(3, 'draft'),
   ];
   const drafts = mergeServerMessages({}, {}, serverMessages);
 
@@ -338,9 +327,7 @@ test('regression: Step 2 and Step 3 select their own quarantined drafts while St
   const step3 = resolveStepMessage(drafts, serverMessages, 3);
   assert.equal(step1.status, 'sent');
   assert.equal(step2.status, 'draft');
-  assert.equal(step2.quarantined, true);
   assert.equal(step3.status, 'draft');
-  assert.equal(step3.quarantined, true);
 
   // Banner/lock state per selected step: Step 1 locked, Steps 2/3 editable.
   assert.equal(isLockedMessage(step1), true);
@@ -351,20 +338,20 @@ test('regression: Step 2 and Step 3 select their own quarantined drafts while St
 test('getActiveStepMessage re-resolves a stale binding to the selected step', () => {
   const serverMessages = [
     msg(1, 'sent'),
-    msg(2, 'draft', { quarantined: true }),
-    msg(3, 'draft', { quarantined: true }),
+    msg(2, 'draft'),
+    msg(3, 'draft'),
   ];
   const drafts = mergeServerMessages({}, {}, serverMessages);
 
   // Bound message matches the selected step -> used as-is.
-  const bound = msg(2, 'draft', { quarantined: true, subject: 'locally edited' });
+  const bound = msg(2, 'draft', { subject: 'locally edited' });
   assert.equal(
     getActiveStepMessage(drafts, serverMessages, 2, bound).subject,
     'locally edited',
   );
 
   // Stale binding (Step 1 sent) while Step 2 is selected -> re-resolves to the
-  // Step 2 quarantined draft, so the sent banner can never appear.
+  // Step 2 draft, so the sent banner can never appear.
   const stale = msg(1, 'sent');
   const active = getActiveStepMessage(drafts, serverMessages, 2, stale);
   assert.equal(active.step, 2);
@@ -378,11 +365,11 @@ test('getActiveStepMessage re-resolves a stale binding to the selected step', ()
 
 test('regression: CompanyDetail gates banner, tab badge and pill on isLockedMessage', async () => {
   const src = await readFile(new URL('../pages/CompanyDetail.jsx', import.meta.url), 'utf8');
-  // Banner uses the quarantine-aware check on the active (selected-step) message.
+  // Banner uses the check on the active (selected-step) message.
   assert.match(src, /isLockedMessage\(activeMessage\) &&/);
-  // Tab badge uses the quarantine-aware check.
+  // Tab badge uses the check.
   assert.match(src, /const isSent = isLockedMessage\(stepMsg\)/);
-  // Status pill + send button use the quarantine-aware check.
+  // Status pill + send button use the check.
   assert.match(src, /isLockedMessage\(editingMessage\) \? 'bg-emerald-100/);
   assert.match(src, /\{isLockedMessage\(editingMessage\) \? \(/);
   // The active message is derived with the stale-binding guard.
@@ -391,90 +378,64 @@ test('regression: CompanyDetail gates banner, tab badge and pill on isLockedMess
   assert.doesNotMatch(src, /\{editingMessage\.status === 'sent' && \(/);
 });
 
-test('regression: QuarantineReleaseModal enforces in-memory keys and target validation', async () => {
-  const modalSrc = await readFile(new URL('../components/QuarantineReleaseModal.jsx', import.meta.url), 'utf8');
-  // Key is kept in local component state only, never persisted
-  assert.match(modalSrc, /const \[adminKey, setAdminKey\] = useState\(''\);/);
-  assert.doesNotMatch(modalSrc, /localStorage\./);
-  assert.doesNotMatch(modalSrc, /sessionStorage\./);
-  // Zeros key when closed
-  assert.match(modalSrc, /setAdminKey\(''\);/);
-  // Calls the authenticated backend release endpoint with X-Admin-Key header
-  assert.match(modalSrc, /\/outreach\/\$\{targetId\}\/release-quarantine/);
-  assert.match(modalSrc, /'X-Admin-Key': adminKey/);
-  // Validates exact ID confirmation
-  assert.match(modalSrc, /confirmId\.trim\(\) !== targetId/);
-  // Validates reason length >= 5
-  assert.match(modalSrc, /reason\.trim\(\)\.length < 5/);
-});
-
-test('regression: CompanyDetail and Outbox mount QuarantineReleaseModal for quarantined drafts', async () => {
+test('regression: no quarantine references remain in the frontend source', async () => {
   const compSrc = await readFile(new URL('../pages/CompanyDetail.jsx', import.meta.url), 'utf8');
-  assert.match(compSrc, /import QuarantineReleaseModal from '\.\.\/components\/QuarantineReleaseModal';/);
-  assert.match(compSrc, /<QuarantineReleaseModal/);
-  assert.match(compSrc, /setQuarantineReleaseTarget\(editingMessage\)/);
-
   const outboxSrc = await readFile(new URL('../pages/Outbox.jsx', import.meta.url), 'utf8');
-  assert.match(outboxSrc, /import QuarantineReleaseModal from '\.\.\/components\/QuarantineReleaseModal';/);
-  assert.match(outboxSrc, /<QuarantineReleaseModal/);
-  assert.match(outboxSrc, /setQuarantineReleaseTarget\(msg\)/);
-});
-
-test('regression: QuarantineReleaseModal implements full security and validation controls', async () => {
-  const modalSrc = await readFile(new URL('../components/QuarantineReleaseModal.jsx', import.meta.url), 'utf8');
-  // 1. Password masking for admin key field
-  assert.match(modalSrc, /type="password"/);
-  // 2. Reason validation (minimum 5 chars)
-  assert.match(modalSrc, /reason\.trim\(\)\.length < 5/);
-  // 3. Exact message ID confirmation
-  assert.match(modalSrc, /confirmId\.trim\(\) !== targetId/);
-  // 4. Expected batch confirmation
-  assert.match(modalSrc, /expectedBatch\.trim\(\)\.length > 0/);
-  // 5. Admin key presence check
-  assert.match(modalSrc, /!adminKey\.trim\(\)/);
-  // 6. Anti-duplicate loading protection
-  assert.match(modalSrc, /disabled=\{!canSubmit\}/);
-  assert.match(modalSrc, /'Releasing\.\.\.' : 'Release from Quarantine'/);
-  // 7. Transient key cleared on modal close and submission
-  assert.match(modalSrc, /setAdminKey\(''\)/);
-  // 8. Error handling surfaces error without claiming release
-  assert.match(modalSrc, /setError\(err\.message/);
-  // 9. Success callback refreshes caller
-  assert.match(modalSrc, /typeof onSuccess === 'function'/);
-});
-
-test('regression: isQuarantined recognizes quarantine.active object', () => {
-  assert.equal(isQuarantined({ quarantine: { active: true } }), true);
-  assert.equal(isQuarantined({ quarantine: { active: false } }), false);
-  assert.equal(isQuarantined({ quarantined: false, quarantine: { active: true } }), true);
-  assert.equal(isQuarantined({ quarantined: false }), false);
-});
-
-test('regression: CompanyDetail disables Send Email button for quarantined messages with tooltip', async () => {
-  const src = await readFile(new URL('../pages/CompanyDetail.jsx', import.meta.url), 'utf8');
-  // Send button disabled when message is quarantined
-  assert.match(src, /disabled=\{sendingEmail \|\| !editingMessage\.recipientEmail \|\| isQuarantined\(editingMessage\)\}/);
-  // Tooltip explicitly informs operator to review and release before sending
-  assert.match(src, /isQuarantined\(editingMessage\)\s*\?\s*['"]This message is quarantined\. Review and release it before sending\.['"]/);
-});
-
-test('regression: CompanyDetail and Outbox send handlers block quarantined sends before API call', async () => {
-  const compSrc = await readFile(new URL('../pages/CompanyDetail.jsx', import.meta.url), 'utf8');
-  // Send handler has hard stop for quarantined messages
-  assert.match(compSrc, /if \(isQuarantined\(editingMessage\)\) \{\s*setError\(['"]This message is quarantined\. Review and release it before sending\.['"]\);\s*return;/);
-
-  const outboxSrc = await readFile(new URL('../pages/Outbox.jsx', import.meta.url), 'utf8');
-  // Outbox send handler also blocks quarantined messages
-  assert.match(outboxSrc, /if \(message\?\.quarantined === true \|\| Boolean\(message\?\.quarantine && message\?\.quarantine\?\.active === true\)\) \{\s*setError\(['"]This message is quarantined\. Review and release it before sending\.['"]\);\s*return;/);
+  const editorSrc = await readFile(new URL('./outreachEditor.js', import.meta.url), 'utf8');
+  const statsSrc = await readFile(new URL('./outreachStats.js', import.meta.url), 'utf8');
+  for (const src of [compSrc, outboxSrc, editorSrc, statsSrc]) {
+    assert.doesNotMatch(src, /quarantin/i);
+  }
 });
 
 test('regression: CompanyDetail protects active editor step from being clobbered by other step saves', async () => {
   const src = await readFile(new URL('../pages/CompanyDetail.jsx', import.meta.url), 'utf8');
   // Only updates editingMessage when selected step matches saved step
   assert.match(src, /if \(selectedStepRef\.current === savedStep\) \{\s*setEditingMessage\(updated\);/);
-  // Synchronizes Step 1 recipient and CC to follow-up drafts without mutating quarantined follow-ups
+  // Synchronizes Step 1 recipient and CC to follow-up drafts without mutating locked/sent follow-ups
   assert.match(src, /if \(savedStep === 1 && sync\) \{/);
-  assert.match(src, /!isLockedMessage\(followUp\) && !isQuarantined\(followUp\)/);
+  assert.match(src, /!isLockedMessage\(followUp\)/);
+});
+
+test('describeScheduleResult reflects Step 1 sent state accurately', () => {
+  const res = {
+    data: [
+      { step: 2, status: 'scheduled' },
+      { step: 3, status: 'scheduled' },
+    ],
+  };
+  const step1Sent = { step: 1, status: 'sent' };
+  const feedback = describeScheduleResult(res, step1Sent);
+  assert.equal(feedback.tone, 'success');
+  assert.match(feedback.message, /Step 1 was previously sent/);
+  assert.match(feedback.message, /Step 2 & Step 3 scheduled/);
+});
+
+test('describeScheduleResult reports un-sent Step 1 approval', () => {
+  const res = {
+    message: 'Step 1 approved for manual send; Step 2, 3 scheduled for automated drip',
+    data: [
+      { step: 1, status: 'approved' },
+      { step: 2, status: 'scheduled' },
+      { step: 3, status: 'scheduled' },
+    ],
+  };
+  const step1Draft = { step: 1, status: 'draft' };
+  const feedback = describeScheduleResult(res, step1Draft);
+  assert.equal(feedback.tone, 'success');
+  assert.match(feedback.message, /approved for manual send/);
+});
+
+test('describeScheduleResult reports warning when follow-ups revert to draft due to invalid recipient', () => {
+  const res = {
+    data: [
+      { step: 2, status: 'draft' },
+      { step: 3, status: 'draft' },
+    ],
+  };
+  const feedback = describeScheduleResult(res, { step: 1, status: 'approved' });
+  assert.equal(feedback.tone, 'warning');
+  assert.match(feedback.message, /missing or invalid recipient/);
 });
 
 

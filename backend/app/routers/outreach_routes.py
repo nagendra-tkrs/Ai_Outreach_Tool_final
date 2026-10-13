@@ -1,14 +1,8 @@
 import logging
 from typing import Optional
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, HTTPException, Query, Response
 from app.config.database import get_database
 from app.services.email_service import send_outreach_email
-from app.services.quarantine_service import (
-    QuarantineReleaseRequest,
-    reconcile_missing_quarantine_audit_logs,
-    release_quarantined_message_service,
-    verify_admin_release_key,
-)
 from app.services.outreach_service import (
     bulk_generate_outreach,
     delete_outreach_message,
@@ -53,36 +47,24 @@ async def schedule_sequence(company_id: str, payload: dict = Body(...)):
     schedules = payload.get("schedules", [])
     updated = await schedule_sequence_steps(company_id, schedules)
 
-    # Q6: surface quarantined messages the arming step refused to touch, so
-    # the operator gets an explicit, safe result. Read-only: nothing about the
-    # quarantined messages (status, quarantine metadata) is modified here.
-    quarantined_skipped = []
-    comp_oid = to_object_id(company_id)
-    if comp_oid:
-        steps = {
-            s.get("step") for s in (schedules or [])
-            if isinstance(s, dict) and s.get("step")
-        }
-        query = {"companyId": comp_oid, "quarantined": True}
-        if steps:
-            query["step"] = {"$in": sorted(steps)}
-        cursor = get_database().outreachmessages.find(query, {"step": 1, "status": 1})
-        quarantined_skipped = [
-            {"messageId": str(m["_id"]), "step": m.get("step"), "status": m.get("status")}
-            for m in await cursor.to_list(length=100)
-        ]
+    approved_steps = [s.get("step") for s in updated if s.get("status") == "approved"]
+    scheduled_steps = [s.get("step") for s in updated if s.get("status") == "scheduled"]
+    draft_steps = [s.get("step") for s in updated if s.get("status") == "draft"]
 
-    message = "Automated sequence schedule activated"
-    if quarantined_skipped:
-        message += (
-            f"; {len(quarantined_skipped)} quarantined message(s) were skipped "
-            "and remain quarantined"
-        )
+    msg_parts = []
+    if approved_steps:
+        msg_parts.append(f"Step {', '.join(str(x) for x in approved_steps)} approved for manual send")
+    if scheduled_steps:
+        msg_parts.append(f"Step {', '.join(str(x) for x in scheduled_steps)} scheduled for automated drip")
+    if draft_steps:
+        msg_parts.append(f"Step {', '.join(str(x) for x in draft_steps)} kept in draft (missing/invalid recipient)")
+
+    summary_msg = "; ".join(msg_parts) if msg_parts else "Drip sequence schedule updated"
+
     return {
         "success": True,
-        "message": message,
+        "message": summary_msg,
         "data": updated,
-        "quarantinedSkipped": quarantined_skipped,
     }
 
 
@@ -346,20 +328,4 @@ async def send_email(message_id: str, payload: dict = Body(...)):
         "message": "Email dispatched successfully",
         "data": result,
     }
-
-
-@router.post("/quarantine/reconcile-audit-logs")
-async def reconcile_quarantine_audit_logs(
-    admin_key: str = Depends(verify_admin_release_key),
-):
-    return await reconcile_missing_quarantine_audit_logs()
-
-
-@router.post("/{message_id}/release-quarantine")
-async def release_quarantined_message(
-    message_id: str,
-    payload: QuarantineReleaseRequest = Body(...),
-    admin_key: str = Depends(verify_admin_release_key),
-):
-    return await release_quarantined_message_service(message_id, payload, admin_key)
 

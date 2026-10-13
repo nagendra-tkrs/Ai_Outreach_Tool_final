@@ -34,12 +34,9 @@ export function computeDashboardStats(stats) {
   };
 }
 
-// A sent, in-flight, or quarantined message must never offer Send/Resend.
+// A sent or in-flight message must never offer Send/Resend.
 export function canSendMessage(message) {
   if (!message) return false;
-  if (message.quarantined === true || Boolean(message.quarantine && message.quarantine.active === true)) {
-    return false;
-  }
   return message.status !== 'sent' && message.status !== 'sending';
 }
 

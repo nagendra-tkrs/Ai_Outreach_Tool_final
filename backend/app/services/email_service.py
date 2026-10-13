@@ -210,7 +210,6 @@ async def send_outreach_email(message_id: str, send_options: dict = None):
         assert_not_suppressed,
         assert_send_limits,
         validate_recipient_email,
-        is_message_quarantined,
         assert_domain_match_if_enforced,
     )
 
@@ -229,18 +228,6 @@ async def send_outreach_email(message_id: str, send_options: dict = None):
         raise HTTPException(
             status_code=409,
             detail="This message has already been sent. Duplicate sends are blocked."
-        )
-
-    # Q4: quarantine hard-stop at the FINAL send boundary — any message that is
-    # quarantined (by flag, active quarantine dict, or reason) is never sent
-    # through any entry point (manual send route, scheduler dispatch, or any
-    # future caller). This guard runs before any status mutation or SMTP activity,
-    # so a blocked message stays exactly as it is and remains quarantined.
-    if is_message_quarantined(message):
-        raise HTTPException(
-            status_code=409,
-            detail="This message is quarantined and cannot be sent. It remains "
-                   "quarantined pending review."
         )
 
     target_email = send_options.get('recipientEmail') or message.get('recipientEmail')

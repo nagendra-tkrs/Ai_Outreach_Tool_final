@@ -7,6 +7,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from fastapi import HTTPException
 from app.config.database import get_db
 from app.utils.bson_utils import to_object_id, serialize_doc
+from app.services.send_guard import validate_recipient_email
 
 MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -68,21 +69,19 @@ def _followup_delay(msg: dict, step: int) -> int:
         return DEFAULT_FOLLOWUP_DELAYS.get(step, 0)
 
 
-async def activate_followups_on_send(record: dict, db, company_id, recipient_email, now):
+async def activate_followups_on_send(record: dict, db, company_id, recipient_email, now, triggering_step: int = 1):
     """Activate eligible Step 2/3 follow-ups when the prior step is sent.
 
-    This ARMS draft follow-ups (draft -> scheduled), so a successful Step 1 send
-    always starts the drip — the operator no longer has to pre-schedule the
-    sequence first. Every state is handled explicitly and idempotently:
+    This ARMS draft follow-ups (draft -> scheduled) and RE-ANCHORS unsent
+    follow-ups when Step 1 is sent to its actual send time (now), eliminating
+    the drift edge-case where pre-scheduling before Step 1 caused follow-up
+    dates to be calculated from the pre-activation time rather than the actual send time.
 
-      * draft      -> atomic transition to `scheduled` with
-                     scheduledAt = now + delayDays (the message's own delay, or
-                     the 3-day/7-day policy default).
-      * scheduled  -> anchored: the existing scheduledAt is kept.
+    Every state is handled explicitly and idempotently:
       * sent       -> record reflects SENT (idempotent re-send).
       * failed     -> record reflects FAILED.
-      * quarantined-> NEVER armed (Q5 hard guard): record stays PENDING with no
-                     scheduledAt, and the message is left completely untouched.
+      * scheduled (when triggering_step > 1) -> kept as-is since already anchored to Step 1.
+      * draft / scheduled (when triggering_step == 1) -> armed/re-anchored to `now + delayDays`.
     """
     for step in (2, 3):
         key = {2: "followUp1", 3: "followUp2"}.get(step)
@@ -90,11 +89,6 @@ async def activate_followups_on_send(record: dict, db, company_id, recipient_ema
             continue
         msg = await _find_step_message(db, company_id, step, recipient_email)
         if not msg:
-            record[key] = {"status": "PENDING"}
-            continue
-        from app.services.send_guard import is_message_quarantined
-        if is_message_quarantined(msg):
-            # Q5: never auto-arm / schedule / send a quarantined message.
             record[key] = {"status": "PENDING"}
             continue
         status = msg.get("status")
@@ -106,19 +100,22 @@ async def activate_followups_on_send(record: dict, db, company_id, recipient_ema
             }
         elif status == "failed":
             record[key] = {"status": "FAILED", "error": msg.get("error") or "Previously failed"}
-        elif status == "scheduled" and msg.get("scheduledAt"):
-            # Already armed: keep the existing scheduledAt, just mirror it.
+        elif triggering_step > 1 and status == "scheduled" and msg.get("scheduledAt"):
+            # Subsequent step send (e.g. Step 2): keep Step 3's existing schedule that was already anchored to Step 1
             record[key] = {"scheduledAt": msg["scheduledAt"], "status": "PENDING"}
         else:
-            # draft (or any non-terminal state) -> activate atomically.
+            # Step 1 was sent (or step was in draft): anchor or re-anchor to Step 1's actual send time (now)
+            msg_recip = msg.get("recipientEmail") or recipient_email
+            if not validate_recipient_email(msg_recip):
+                record[key] = {"status": "PENDING"}
+                continue
+
             delay = _followup_delay(msg, step)
             scheduled_at = now + timedelta(days=delay)
             armed = await db.outreachmessages.find_one_and_update(
                 {
                     "_id": msg["_id"],
-                    "status": {"$in": ["draft", "scheduled"]},
-                    "quarantined": {"$ne": True},
-                    "quarantine.active": {"$ne": True},
+                    "status": {"$in": ["draft", "scheduled", "approved"]},
                 },
                 {"$set": {
                     "status": "scheduled",
@@ -129,7 +126,7 @@ async def activate_followups_on_send(record: dict, db, company_id, recipient_ema
                 return_document=True,
             )
             if not armed:
-                # Lost a race (sent/failed/quarantined concurrently): leave the
+                # Lost a race (sent/failed concurrently): leave the
                 # record PENDING rather than claiming a schedule we do not own.
                 record[key] = {"status": "PENDING"}
                 continue
@@ -237,9 +234,8 @@ async def record_email_dispatch(message: dict, dispatch_result: dict):
                 "messageId": str(message.get('_id', ''))
             }
             # Activate the drip: eligible Step 2/3 drafts are armed to `scheduled`
-            # off this send (3-day / 7-day policy). Quarantined follow-ups are
-            # never armed and stay PENDING.
-            await activate_followups_on_send(record, db, cid, target_email, now)
+            # off this send (3-day / 7-day policy).
+            await activate_followups_on_send(record, db, cid, target_email, now, triggering_step=1)
             record["campaignStatus"] = 'INITIAL_SENT'
             record["lastContactedAt"] = now
         else:
@@ -257,7 +253,7 @@ async def record_email_dispatch(message: dict, dispatch_result: dict):
             }
             # Step 3 was normally armed when Step 1 went out; if it was only
             # activated later, arm it now from this send (idempotent).
-            await activate_followups_on_send(record, db, cid, target_email, now)
+            await activate_followups_on_send(record, db, cid, target_email, now, triggering_step=2)
             record["campaignStatus"] = 'FOLLOW_UP_1_SENT'
             record["lastContactedAt"] = now
         else:

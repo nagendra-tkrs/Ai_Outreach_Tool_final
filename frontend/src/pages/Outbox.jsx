@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api';
 import { computeDashboardStats, canSendMessage } from '../utils/outreachStats';
-import QuarantineReleaseModal from '../components/QuarantineReleaseModal';
 
 const STATUS_BADGES = {
   draft: 'bg-slate-100 text-slate-700 border-slate-200',
@@ -59,7 +58,6 @@ export default function Outbox() {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [selectedRecord, setSelectedRecord] = useState(null);
-  const [quarantineReleaseTarget, setQuarantineReleaseTarget] = useState(null);
   const [sendingId, setSendingId] = useState(null);
   const [updatingReplyId, setUpdatingReplyId] = useState(null);
   const [error, setError] = useState('');
@@ -128,10 +126,6 @@ export default function Outbox() {
   }, []);
 
   const handleSend = async (message) => {
-    if (message?.quarantined === true || Boolean(message?.quarantine && message?.quarantine?.active === true)) {
-      setError('This message is quarantined. Review and release it before sending.');
-      return;
-    }
     // FIX 4: never attempt to resend an already-sent message from the UI.
     if (!canSendMessage(message)) {
       setError('This message has already been sent. Duplicate sends are blocked.');
@@ -806,11 +800,6 @@ export default function Outbox() {
                           <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase border ${STATUS_BADGES[msg.status] || STATUS_BADGES.draft}`}>
                             {msg.status.toUpperCase()}
                           </span>
-                          {msg.quarantined === true && (
-                            <span className="block mt-1 text-[10px] bg-rose-50 text-rose-700 font-bold px-2 py-0.5 rounded-full border border-rose-200 text-center">
-                              🔒 Quarantined
-                            </span>
-                          )}
                         </td>
 
                         <td className="px-4 py-4 whitespace-nowrap text-slate-500 font-mono text-[11px]">
@@ -822,16 +811,6 @@ export default function Outbox() {
                         </td>
 
                         <td className="px-5 py-4 whitespace-nowrap text-right space-x-2">
-                          {msg.quarantined === true && (
-                            <button
-                              type="button"
-                              onClick={() => setQuarantineReleaseTarget(msg)}
-                              className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-300 rounded-lg text-xs font-bold transition-colors shadow-2xs"
-                              title="Release this draft from quarantine"
-                            >
-                              🔓 Release
-                            </button>
-                          )}
                           <button
                             onClick={() => setSelectedMessage(msg)}
                             className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-bold transition-colors"
@@ -1203,28 +1182,8 @@ export default function Outbox() {
                 <span className={`px-2.5 py-1 rounded-full text-xs font-bold border ${STATUS_BADGES[selectedMessage.status]}`}>
                   Status: {selectedMessage.status?.toUpperCase()}
                 </span>
-                {selectedMessage.quarantined === true && (
-                  <span className="text-[10px] bg-rose-50 text-rose-700 font-bold px-2 py-0.5 rounded-full border border-rose-200">
-                    🔒 Quarantined
-                  </span>
-                )}
               </div>
               <div className="flex gap-2">
-                {selectedMessage.quarantined === true && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const msg = selectedMessage;
-                      setSelectedMessage(null);
-                      setQuarantineReleaseTarget(msg);
-                    }}
-                    className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-300 rounded-xl text-xs font-bold transition-colors shadow-2xs flex items-center gap-1"
-                    title="Release from quarantine"
-                  >
-                    <span>🔓</span>
-                    <span>Release Quarantine</span>
-                  </button>
-                )}
                 <button
                   onClick={() => setSelectedMessage(null)}
                   className="px-4 py-2 border border-slate-200 text-slate-700 rounded-xl text-xs font-bold hover:bg-slate-50"
@@ -1363,17 +1322,6 @@ export default function Outbox() {
           </div>
         </div>
       )}
-
-      {/* QUARANTINE RELEASE MODAL */}
-      <QuarantineReleaseModal
-        isOpen={Boolean(quarantineReleaseTarget)}
-        onClose={() => setQuarantineReleaseTarget(null)}
-        message={quarantineReleaseTarget}
-        companyName={quarantineReleaseTarget?.companyId?.companyName}
-        onSuccess={() => {
-          fetchOutbox();
-        }}
-      />
     </div>
   );
 }

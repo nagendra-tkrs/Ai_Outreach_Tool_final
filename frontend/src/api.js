@@ -9,9 +9,9 @@ api.interceptors.response.use(
   (response) => response.data,
   (error) => {
     const data = error.response?.data;
-    // FastAPI carries the human-readable failure in `detail` (e.g. the
-    // quarantined-draft save validation errors) — surface it so the UI shows a
-    // clear, actionable message instead of "Request failed with status code 400".
+    // FastAPI carries the human-readable failure in `detail` (e.g. draft save
+    // validation errors) — surface it so the UI shows a clear, actionable
+    // message instead of "Request failed with status code 400".
     const message =
       (typeof data?.detail === 'string' && data.detail) ||
       data?.message ||

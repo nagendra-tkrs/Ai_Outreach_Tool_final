@@ -1,30 +1,24 @@
 """
-End-to-End Verification of New Company Excel Import and Follow-up Quarantine Workflow.
+End-to-End Verification of New Company Excel Import and Follow-up Workflow.
 
 Strict Safety Rules:
 - Isolated disposable database: ai_client_outreach_test_e2e_new_company
 - Mocked SMTP: zero real email delivery, zero network SMTP connections
 - Dropped cleanly before and after the test run
-- Zero mutation of production database or batch quarantine-20261009
+- Zero mutation of the production database
 """
 
 import io
-import os
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 import pytest
 import openpyxl
 import httpx
-from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 
 import app.config.database as db_module
 from app.main import app
-from app.services.send_guard import is_message_quarantined
-from app.services.scheduler_service import process_scheduled_emails
 
 TEST_DB_NAME = "ai_client_outreach_test_e2e_new_company"
-TEST_ADMIN_KEY = "test-e2e-admin-release-key-2026"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -79,7 +73,7 @@ def create_excel_bytes(headers, rows):
 
 
 @pytest.mark.asyncio
-async def test_new_company_excel_import_to_quarantine_e2e(client, isolated_test_db, mock_smtp_guard):
+async def test_new_company_excel_import_to_scheduling_e2e(client, isolated_test_db, mock_smtp_guard):
     db = isolated_test_db
 
     # -------------------------------------------------------------------------
@@ -162,17 +156,17 @@ async def test_new_company_excel_import_to_quarantine_e2e(client, isolated_test_
 
     assert step1 is not None and step2 is not None and step3 is not None
 
-    # Step 1: Draft, unquarantined, recipientName populated from company.contactName
-    assert step1["status"] == "draft"
-    assert step1.get("quarantined") in (False, None)
-    assert is_message_quarantined(step1) is False
+    # All steps start as ordinary drafts (no quarantine fields).
+    for step_doc in (step1, step2, step3):
+        assert step_doc["status"] == "draft"
+        assert step_doc.get("quarantined") is None
     assert step1["recipientName"] == "Alice Green"
     # Note: When initially generated without crawler/contact discovery, recipientEmail is ""
     assert step1.get("recipientEmail", "") == ""
 
-    # Security Guard: Editing Step 1 recipient via PUT /api/outreach/{step1_id}
-    # does NOT mutate quarantined follow-ups (quarantined messages are strictly immune
-    # to side-effect updates via "quarantined": {"$ne": True}).
+    # -------------------------------------------------------------------------
+    # 5. Editing Step 1 recipient synchronizes eligible unsent follow-ups
+    # -------------------------------------------------------------------------
     step1_id = str(step1["_id"])
     put_res = await client.put(
         f"/api/outreach/{step1_id}",
@@ -180,50 +174,18 @@ async def test_new_company_excel_import_to_quarantine_e2e(client, isolated_test_
     )
     assert put_res.status_code == 200, f"PUT failed: {put_res.text}"
     sync_data = put_res.json().get("recipientSync", {})
-    # 0 follow-ups updated because Steps 2 and 3 are quarantined!
-    assert sync_data.get("updated", 0) == 0
+    # Steps 2 and 3 are eligible unsent drafts -> both are synchronized.
+    assert sync_data.get("updated", 0) == 2
 
-    # Refresh steps from database
     step1 = await db.outreachmessages.find_one({"_id": step1["_id"]})
     step2 = await db.outreachmessages.find_one({"_id": step2["_id"]})
     step3 = await db.outreachmessages.find_one({"_id": step3["_id"]})
-
     assert step1["recipientEmail"] == "alice@alpha.example"
-
-    # Step 2 & 3: Draft, strictly quarantined and unmodified by Step 1 sync
-    expected_quarantine_batch = f"quarantine-import-{batch_id}"
-    for step_doc, step_num in [(step2, 2), (step3, 3)]:
-        assert step_doc["status"] == "draft", f"Step {step_num} is not draft"
-        assert step_doc.get("quarantined") is True, f"Step {step_num} is not quarantined: True"
-        assert step_doc.get("scheduledAt") is None, f"Step {step_num} has scheduledAt"
-        assert step_doc.get("quarantine", {}).get("active") is True
-        assert step_doc.get("quarantine", {}).get("batch") == expected_quarantine_batch
-        assert step_doc.get("quarantine", {}).get("reason") == "new_import_safety_review"
-        assert len(step_doc.get("quarantine", {}).get("docHash", "")) == 64
-        assert is_message_quarantined(step_doc) is True
+    assert step2["recipientEmail"] == "alice@alpha.example"
+    assert step3["recipientEmail"] == "alice@alpha.example"
 
     # -------------------------------------------------------------------------
-    # 5. Direct Send Boundary Protection: Attempt to send quarantined Step 2
-    # -------------------------------------------------------------------------
-    step2_id = str(step2["_id"])
-    mock_smtp_guard.reset_mock()
-
-    send_res = await client.post(
-        f"/api/outreach/{step2_id}/send",
-        json={"recipientEmail": "alice@alpha.example"},
-    )
-    assert send_res.status_code == 409, f"Direct send should return 409, got {send_res.status_code}"
-    assert "quarantined" in send_res.json().get("message", "").lower()
-    mock_smtp_guard.assert_not_called()
-
-    # Verify Step 2 document in DB was NOT mutated
-    step2_post_send = await db.outreachmessages.find_one({"_id": step2["_id"]})
-    assert step2_post_send["status"] == "draft"
-    assert step2_post_send["quarantined"] is True
-    assert "sentAt" not in step2_post_send
-
-    # -------------------------------------------------------------------------
-    # 6. Sequence Scheduling Protection: Attempt to schedule sequence
+    # 6. Sequence Scheduling: Step 1 approved, follow-ups armed
     # -------------------------------------------------------------------------
     sched_res = await client.post(
         f"/api/companies/{alpha_cid}/outreach/schedule",
@@ -236,150 +198,19 @@ async def test_new_company_excel_import_to_quarantine_e2e(client, isolated_test_
         },
     )
     assert sched_res.status_code == 200
-    sched_data = sched_res.json()
-    assert "quarantinedSkipped" in sched_data
-    skipped_steps = [item["step"] for item in sched_data["quarantinedSkipped"]]
-    assert 2 in skipped_steps and 3 in skipped_steps
 
-    # Verify Step 1 is approved for send, but Steps 2 & 3 remain draft without scheduledAt
     step1_post_sched = await db.outreachmessages.find_one({"_id": step1["_id"]})
     step2_post_sched = await db.outreachmessages.find_one({"_id": step2["_id"]})
     step3_post_sched = await db.outreachmessages.find_one({"_id": step3["_id"]})
 
     assert step1_post_sched["status"] == "approved"
-
-    assert step2_post_sched["status"] == "draft"
-    assert step2_post_sched["quarantined"] is True
-    assert step2_post_sched.get("scheduledAt") is None
-
-    assert step3_post_sched["status"] == "draft"
-    assert step3_post_sched["quarantined"] is True
-    assert step3_post_sched.get("scheduledAt") is None
+    assert step2_post_sched["status"] == "scheduled"
+    assert step2_post_sched.get("scheduledAt") is not None
+    assert step3_post_sched["status"] == "scheduled"
+    assert step3_post_sched.get("scheduledAt") is not None
 
     # -------------------------------------------------------------------------
-    # 7. Step 1 Send & Follow-up Activation Guard
-    # -------------------------------------------------------------------------
-    step1_id = str(step1["_id"])
-    mock_smtp_guard.reset_mock()
-
-    step1_send_res = await client.post(
-        f"/api/outreach/{step1_id}/send",
-        json={"recipientEmail": "alice@alpha.example"},
-    )
-    step1_sent = await db.outreachmessages.find_one({"_id": step1["_id"]})
-    assert step1_sent["status"] == "sent"
-    assert step1_sent.get("isTestSend") is True
-
-    # Verify outreach tracking record: follow-ups are NOT armed
-    tracking_record = await db.outreachrecords.find_one({"companyId": alpha_comp["_id"]})
-    assert tracking_record is not None
-    assert tracking_record["initialEmail"]["status"] == "SENT"
-    assert tracking_record["followUp1"]["status"] == "PENDING"
-    assert tracking_record["followUp1"].get("scheduledAt") is None
-    assert tracking_record["followUp2"]["status"] == "PENDING"
-    assert tracking_record["followUp2"].get("scheduledAt") is None
-
-    # -------------------------------------------------------------------------
-    # 8. Scheduler Background Worker Invariant: Skips quarantined messages
-    # -------------------------------------------------------------------------
-    # Even if someone deliberately updated Step 2 to status="scheduled", worker must refuse
-    await db.outreachmessages.update_one(
-        {"_id": step2["_id"]},
-        {"$set": {"status": "scheduled", "scheduledAt": datetime.now(timezone.utc)}}
-    )
-    mock_smtp_guard.reset_mock()
-    await process_scheduled_emails()
-    # Verify mock SMTP was NOT called by the scheduler worker
-    mock_smtp_guard.assert_not_called()
-
-    # Revert test tamper back to draft
-    await db.outreachmessages.update_one(
-        {"_id": step2["_id"]},
-        {"$set": {"status": "draft"}, "$unset": {"scheduledAt": ""}}
-    )
-
-    # -------------------------------------------------------------------------
-    # 9. Admin Quarantine Release on Step 2
-    # -------------------------------------------------------------------------
-    with patch.dict(os.environ, {"ADMIN_RELEASE_KEY": TEST_ADMIN_KEY}, clear=False):
-        # Without key -> 401
-        rel_fail = await client.post(
-            f"/api/outreach/{step2_id}/release-quarantine",
-            json={
-                "confirmMessageId": step2_id,
-                "expectedBatch": expected_quarantine_batch,
-                "reason": "Verified contact person and domain for Alpha Corp",
-                "actor": "admin_auditor",
-            },
-        )
-        assert rel_fail.status_code == 401
-
-        # With valid key -> 200 OK
-        rel_ok = await client.post(
-            f"/api/outreach/{step2_id}/release-quarantine",
-            json={
-                "confirmMessageId": step2_id,
-                "expectedBatch": expected_quarantine_batch,
-                "reason": "Verified contact person and domain for Alpha Corp",
-                "actor": "admin_auditor",
-            },
-            headers={"X-Admin-Key": TEST_ADMIN_KEY},
-        )
-        assert rel_ok.status_code == 200
-        rel_data = rel_ok.json()
-        assert rel_data["success"] is True
-
-        # Inspect released Step 2:
-        # Must be quarantined=False, but REMAIN DRAFT, NOT SCHEDULED, NOT SENT
-        step2_released = await db.outreachmessages.find_one({"_id": step2["_id"]})
-        assert step2_released["quarantined"] is False
-        assert step2_released["quarantine"]["active"] is False
-        assert step2_released["quarantineReleased"]["releasedBy"] == "admin_auditor"
-        assert step2_released["status"] == "draft"
-        assert step2_released.get("scheduledAt") is None
-        assert step2_released.get("sentAt") is None
-
-        # Verify audit log recorded in quarantine_audit_logs
-        audit_log = await db.quarantine_audit_logs.find_one({"messageId": step2_id})
-        assert audit_log is not None
-        assert audit_log["action"] == "RELEASE_QUARANTINE"
-        assert audit_log["batch"] == expected_quarantine_batch
-
-        # Verify Step 3 remains quarantined!
-        step3_check = await db.outreachmessages.find_one({"_id": step3["_id"]})
-        assert step3_check["quarantined"] is True
-        assert step3_check["quarantine"]["active"] is True
-
-    # -------------------------------------------------------------------------
-    # 10. Post-Release Eligibility: Released Step 2 can now be scheduled
-    # -------------------------------------------------------------------------
-    sched_released_res = await client.post(
-        f"/api/companies/{alpha_cid}/outreach/schedule",
-        json={
-            "schedules": [
-                {"step": 2, "delayDays": 3},
-                {"step": 3, "delayDays": 7},
-            ]
-        },
-    )
-    assert sched_released_res.status_code == 200
-    sched_rel_data = sched_released_res.json()
-    rel_skipped = [item["step"] for item in sched_rel_data.get("quarantinedSkipped", [])]
-    # Step 2 is released, so it is NOT skipped! Only Step 3 is skipped!
-    assert 2 not in rel_skipped, f"Released Step 2 should not be skipped: {rel_skipped}"
-    assert 3 in rel_skipped, f"Unreleased Step 3 must still be skipped: {rel_skipped}"
-
-    step2_now_scheduled = await db.outreachmessages.find_one({"_id": step2["_id"]})
-    assert step2_now_scheduled["status"] == "scheduled"
-    assert step2_now_scheduled.get("scheduledAt") is not None
-
-    step3_still_draft = await db.outreachmessages.find_one({"_id": step3["_id"]})
-    assert step3_still_draft["status"] == "draft"
-    assert step3_still_draft["quarantined"] is True
-    assert step3_still_draft.get("scheduledAt") is None
-
-    # -------------------------------------------------------------------------
-    # 11. Duplicate Detection on Re-Import: Upload the exact same Excel sheet
+    # 7. Duplicate Detection on Re-Import: Upload the exact same Excel sheet
     # -------------------------------------------------------------------------
     re_upload_res = await client.post(
         "/api/import/excel",
@@ -398,8 +229,6 @@ async def test_new_company_excel_import_to_quarantine_e2e(client, isolated_test_
     assert "no valid rows" in re_confirm_res.json().get("message", "").lower()
 
     # -------------------------------------------------------------------------
-    # 12. Transport Safety: Zero real delivery calls
+    # 8. Transport Safety: Zero real delivery calls
     # -------------------------------------------------------------------------
-    # In test sandbox mode, real SMTP calls are strictly 0
     assert mock_smtp_guard.call_count == 0
-

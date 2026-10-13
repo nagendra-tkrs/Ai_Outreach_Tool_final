@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
@@ -6,12 +7,22 @@ from app.config.database import get_database
 from app.utils.bson_utils import serialize_doc, to_object_id
 from app.services.email_service import send_outreach_email
 from app.services.outreach_tracking_service import cancel_pending_followups
-from app.services.send_guard import is_within_sending_window, is_message_quarantined, validate_recipient_email
+from app.services.send_guard import is_within_sending_window, validate_recipient_email
 
 logger = logging.getLogger(__name__)
 
 _scheduler_task: asyncio.Task | None = None
 _is_processing = False
+
+
+def is_scheduler_enabled() -> bool:
+    """Configuration kill switch for automated drip scheduler.
+
+    Defaults to False (disabled) unless ENABLE_SCHEDULER is explicitly set to
+    'true', '1', or 'yes'.
+    """
+    val = os.getenv("ENABLE_SCHEDULER", "false").strip().lower()
+    return val in ("true", "1", "yes")
 
 
 def _as_utc(value):
@@ -54,22 +65,13 @@ def _as_utc(value):
 # (status scheduled -> sending) so a message can never be dispatched twice.
 
 
-async def _find_step_message(db, company_id, step, recipient_email=None, status=None,
-                             exclude_quarantined=False):
-    """Find the outreachmessage for a company/step, preferring a recipient match.
-
-    `exclude_quarantined` is used by dispatch-selection callers so a quarantined
-    message is never picked up for sending; lookups for bookkeeping (e.g. the
-    previous step's send time) keep the message visible.
-    """
+async def _find_step_message(db, company_id, step, recipient_email=None, status=None):
+    """Find the outreachmessage for a company/step, preferring a recipient match."""
     query = {"companyId": company_id, "step": step}
     if recipient_email:
         query["recipientEmail"] = recipient_email
     if status:
         query["status"] = status
-    if exclude_quarantined:
-        query["quarantined"] = {"$ne": True}
-        query["quarantine.active"] = {"$ne": True}
     msg = await db.outreachmessages.find_one(query, sort=[("updatedAt", -1)])
     if not msg and recipient_email:
         # Fall back to the step's message regardless of recipient so legacy
@@ -77,9 +79,6 @@ async def _find_step_message(db, company_id, step, recipient_email=None, status=
         fallback = {"companyId": company_id, "step": step}
         if status:
             fallback["status"] = status
-        if exclude_quarantined:
-            fallback["quarantined"] = {"$ne": True}
-            fallback["quarantine.active"] = {"$ne": True}
         msg = await db.outreachmessages.find_one(fallback, sort=[("updatedAt", -1)])
     return msg
 
@@ -111,12 +110,10 @@ async def _sync_record_schedule(db, company_id, recipient_email, step, scheduled
     record = await db.outreachrecords.find_one({"companyId": company_id, "recipientEmail": recipient_email})
     if not record:
         return
-    prior_key = "initialEmail" if step == 2 else "followUp1"
-    if record.get(prior_key, {}).get("status") != "SENT":
-        # The previous step has not gone out yet; record_email_dispatch will set
-        # the schedule the moment it does.
+    if record.get(key, {}).get("status") in ("SENT", "SENDING"):
         return
-    if record.get(key, {}).get("status") == "SENT":
+    # Only mirror when Step 1 has gone out (meaning the sequence has started)
+    if record.get("initialEmail", {}).get("status") != "SENT":
         return
     await db.outreachrecords.update_one(
         {"_id": record["_id"]},
@@ -134,6 +131,22 @@ async def schedule_sequence_steps(company_id: str, schedules: list = None) -> li
     """
     if schedules is None:
         schedules = []
+
+    # Sequence order validation: Step 3 delay must be greater than Step 2 delay
+    step_delays = {}
+    for s in schedules:
+        try:
+            st = int(s.get("step", 0) or 0)
+            d = int(s.get("delayDays", 0) or 0)
+            if st in (2, 3):
+                step_delays[st] = d
+        except (TypeError, ValueError):
+            pass
+    if 2 in step_delays and 3 in step_delays and step_delays[3] <= step_delays[2]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Schedule sequence conflict: Step 3 delay ({step_delays[3]}d) must be greater than Step 2 delay ({step_delays[2]}d)."
+        )
 
     db = get_database()
     now = datetime.now(timezone.utc)
@@ -153,38 +166,19 @@ async def schedule_sequence_steps(company_id: str, schedules: list = None) -> li
 
         new_status = "approved" if delay_days == 0 else "scheduled"
 
-        # Q1: quarantine hard-stop at the ONLY arming path — an explicitly
-        # quarantined message is never approved/scheduled/activated, whatever
-        # its current status. A missing `quarantined` field (legacy message)
-        # remains eligible, exactly as before. The filter is inside the atomic
-        # update so no race can arm a message between check and write.
+        # The filter is inside the atomic update so no race can arm a message
+        # between check and write.
         msg = await db.outreachmessages.find_one_and_update(
             {
                 "companyId": comp_oid,
                 "step": step,
                 "status": {"$in": ["draft", "approved", "scheduled"]},
-                "quarantined": {"$ne": True},
-                "quarantine.active": {"$ne": True},
             },
             {"$set": {"status": new_status, "delayDays": delay_days, "updatedAt": now}},
             return_document=True,
         )
         if not msg:
-            # Nothing to activate for this step (missing, already sent, or
-            # quarantined — a quarantined message is skipped with its status
-            # and quarantine metadata left completely untouched).
-            quarantined = await db.outreachmessages.find_one(
-                {
-                    "companyId": comp_oid,
-                    "step": step,
-                    "$or": [{"quarantined": True}, {"quarantine.active": True}],
-                }
-            )
-            if quarantined:
-                logger.warning(
-                    f"[Scheduler] Step {step} for company {company_id} remains "
-                    f"QUARANTINED (message {quarantined['_id']}); not armed."
-                )
+            # Nothing to activate for this step (missing or already sent).
             continue
 
         recipient_email = msg.get("recipientEmail")
@@ -286,20 +280,10 @@ async def _release_or_fail(claimed_msg, err, now, deferrable: bool):
 async def _dispatch_scheduled_message(msg: dict, now, send_options: dict = None):
     """Atomically claim then dispatch one `scheduled` message.
 
-    Returns one of: sent | failed | deferred | not_ready | skipped | quarantined.
+    Returns one of: sent | failed | deferred | not_ready | skipped.
     """
     db = get_database()
     message_id = msg.get("_id")
-
-    # Q2: quarantine hard-stop at the dispatch boundary — never claim, never
-    # mutate, never send any quarantined message, even if bad data
-    # ever put one in `scheduled`. Defence in depth on top of the selection
-    # filters; the message's status and quarantine metadata stay untouched.
-    if is_message_quarantined(msg):
-        logger.warning(
-            f"[Scheduler] Message {message_id} is quarantined; refusing to dispatch."
-        )
-        return "quarantined"
 
     # E3.5: outside the configured sending window -> defer without sending.
     if not is_within_sending_window(now):
@@ -322,15 +306,11 @@ async def _dispatch_scheduled_message(msg: dict, now, send_options: dict = None)
         return "failed"
 
     # Atomic claim: only one worker (message worker or record reconciler) can
-    # transition scheduled -> sending for a given message. Q2: the claim itself
-    # also refuses quarantined messages, so no worker can ever take ownership
-    # of one.
+    # transition scheduled -> sending for a given message.
     claimed = await db.outreachmessages.find_one_and_update(
         {
             "_id": message_id,
             "status": "scheduled",
-            "quarantined": {"$ne": True},
-            "quarantine.active": {"$ne": True},
         },
         {"$set": {"status": "sending", "updatedAt": now}},
         return_document=True,
@@ -415,11 +395,10 @@ async def process_automated_follow_ups():
 
             # The message is authoritative: only an explicitly `scheduled`
             # message may auto-dispatch. Draft/approved/inactive sequences and
-            # missing messages are simply skipped (never generated here). Q3:
-            # quarantined messages are excluded from dispatch selection.
+            # missing messages are simply skipped (never generated here).
             msg = await _find_step_message(
                 db, record["companyId"], step, record.get("recipientEmail"),
-                status="scheduled", exclude_quarantined=True,
+                status="scheduled",
             )
             if not msg:
                 # The message is authoritative: only an explicitly
@@ -431,12 +410,10 @@ async def process_automated_follow_ups():
                 # activation in record_email_dispatch. Instead we
                 # reconcile the stale tracking record so it agrees with
                 # the inactive message and is not re-selected: clear the
-                # stale scheduledAt. Quarantined drafts are left
-                # completely untouched (quarantine is a hard stop that
-                # requires human action).
+                # stale scheduledAt.
                 draft = await _find_step_message(
                     db, record["companyId"], step, record.get("recipientEmail"),
-                    status="draft", exclude_quarantined=True,
+                    status="draft",
                 )
                 if draft:
                     await db.outreachrecords.update_one(
@@ -481,8 +458,12 @@ async def process_automated_follow_ups():
                 )
 
 
-async def process_scheduled_emails():
+async def process_scheduled_emails(force: bool = False):
     """Background worker checking for due scheduled emails and automated follow-ups."""
+    if not force and not is_scheduler_enabled():
+        logger.info("[Scheduler] process_scheduled_emails skipped: scheduler is disabled (ENABLE_SCHEDULER is false or unset).")
+        return
+
     global _is_processing
     if _is_processing:
         return
@@ -494,22 +475,16 @@ async def process_scheduled_emails():
 
         # 1. Dispatch due `scheduled` messages (drafts/approved are never
         #    selected because the query filters on status == "scheduled").
-        #    Q3: explicitly quarantined messages are never selected either.
         cursor = db.outreachmessages.find(
             {
                 "status": "scheduled",
                 "scheduledAt": {"$lte": now},
-                "quarantined": {"$ne": True},
-                "quarantine.active": {"$ne": True},
             }
         ).limit(10)
 
         due_messages = await cursor.to_list(length=10)
 
         for msg in due_messages:
-            if is_message_quarantined(msg):
-                logger.warning(f"[Scheduler] Skipping quarantined message {msg.get('_id')}")
-                continue
             tracking_record = await db.outreachrecords.find_one(
                 {
                     "companyId": msg["companyId"],
@@ -578,7 +553,18 @@ async def _scheduler_loop(interval_sec: int = 60):
 
 def start_scheduler(interval_sec: int = 60):
     global _scheduler_task
+    if not is_scheduler_enabled():
+        logger.info(
+            "[Scheduler] Automated Drip Sequence & Follow-up Scheduler is DISABLED "
+            "(ENABLE_SCHEDULER is false or unset). Background dispatch loop will NOT start."
+        )
+        return
+
     if _scheduler_task is None or _scheduler_task.done():
+        logger.info(
+            f"[Scheduler] Automated Drip Sequence & Follow-up Scheduler is ENABLED. "
+            f"Starting background worker loop ({interval_sec}s interval)..."
+        )
         _scheduler_task = asyncio.create_task(_scheduler_loop(interval_sec))
 
 

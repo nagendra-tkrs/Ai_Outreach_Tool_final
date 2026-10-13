@@ -7,16 +7,13 @@ SMTP stubbed, sandbox send path):
   1. A successful Step 1 send ACTIVATES eligible draft Step 2/3 follow-ups
      (draft -> scheduled) using the 3-day / 7-day policy — no pre-scheduling
      required.
-  2. Quarantined follow-ups are NEVER activated (Q5) — they stay draft and the
-     record stays PENDING with no scheduledAt.
-  3. An explicit per-message delayDays overrides the policy default.
-  4. The reconciler heals the "record PENDING+due but message draft" mismatch
+  2. An explicit per-message delayDays overrides the policy default.
+  3. The reconciler heals the "record PENDING+due but message draft" mismatch
      by re-activating the draft (prior step must actually be sent).
-  5. The reconciler never heals a quarantined draft.
-  6. The scheduler dispatches the LATEST saved content (edit after arming).
-  7. Duplicate dispatch is prevented (atomic claim, exactly-once).
-  8. A reply cancels pending follow-ups; a failed send marks the record FAILED.
-  9. Editing a follow-up never sends or activates it by itself.
+  4. The scheduler dispatches the LATEST saved content (edit after arming).
+  5. Duplicate dispatch is prevented (atomic claim, exactly-once).
+  6. A reply cancels pending follow-ups; a failed send marks the record FAILED.
+  7. Editing a follow-up never sends or activates it by itself.
 
 Isolation: dedicated MongoDB database (`ai_client_outreach_test_autofollow`)
 dropped between runs — never touches the live `ai_client_outreach` database.
@@ -156,35 +153,7 @@ async def test_step1_send_activates_draft_followups(isolated_test_db, block_real
 
 
 # ---------------------------------------------------------------------------
-# 2. Quarantined follow-ups are NEVER activated (Q5 hard guard).
-# ---------------------------------------------------------------------------
-async def test_quarantined_followups_never_activated(isolated_test_db, block_real_smtp):
-    db = isolated_test_db
-    cid, recipient, msg_ids = await make_sequence(db)
-    await db.outreachmessages.update_many(
-        {"companyId": cid, "step": {"$in": [2, 3]}},
-        {"$set": {
-            "quarantined": True,
-            "quarantine": {"batch": "quarantine-20261009", "reason": "safety"},
-        }},
-    )
-
-    await send_outreach_email(str(msg_ids[1]))
-
-    for step in (2, 3):
-        m = await db.outreachmessages.find_one({"_id": msg_ids[step]})
-        assert m["status"] == "draft", "quarantined follow-up must stay draft"
-        assert m["quarantined"] is True, "quarantine flag must be untouched"
-        assert m["quarantine"]["batch"] == "quarantine-20261009"
-
-    rec = await db.outreachrecords.find_one({"companyId": cid, "recipientEmail": recipient})
-    assert rec["followUp1"] == {"status": "PENDING"}, "no scheduledAt for quarantined"
-    assert rec["followUp2"] == {"status": "PENDING"}
-    block_real_smtp.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# 3. An explicit per-message delayDays overrides the policy default.
+# 2. An explicit per-message delayDays overrides the policy default.
 # ---------------------------------------------------------------------------
 async def test_custom_delay_days_override_policy(isolated_test_db, block_real_smtp):
     db = isolated_test_db
@@ -235,32 +204,6 @@ async def test_reconciler_reconciles_pending_record_with_draft_message(isolated_
     rec = await db.outreachrecords.find_one({"_id": rec_res.inserted_id})
     assert rec["followUp1"]["status"] == "PENDING"
     assert "scheduledAt" not in rec["followUp1"]
-
-
-# ---------------------------------------------------------------------------
-# 5. Reconciler never heals a quarantined draft.
-# ---------------------------------------------------------------------------
-async def test_reconciler_does_not_heal_quarantined_draft(isolated_test_db, block_real_smtp):
-    db = isolated_test_db
-    now = datetime.now(timezone.utc)
-    past = now - timedelta(minutes=1)
-    cid, recipient, msg_ids = await make_sequence(db)
-    await db.outreachmessages.update_one(
-        {"_id": msg_ids[1]}, {"$set": {"status": "sent", "sentAt": now - timedelta(days=1)}}
-    )
-    await db.outreachmessages.update_one(
-        {"_id": msg_ids[2]},
-        {"$set": {"quarantined": True, "quarantine": {"batch": "quarantine-20261009"}}},
-    )
-    await insert_record(db, cid, recipient, f1_at=past)
-
-    with patch.object(sched_mod, "send_outreach_email", new=AsyncMock()) as send_mock:
-        await process_automated_follow_ups()
-
-    send_mock.assert_not_awaited()
-    m2 = await db.outreachmessages.find_one({"_id": msg_ids[2]})
-    assert m2["status"] == "draft"
-    assert m2["quarantined"] is True
 
 
 # ---------------------------------------------------------------------------

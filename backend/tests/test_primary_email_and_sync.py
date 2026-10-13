@@ -693,9 +693,9 @@ async def test_sync_reports_conflict_and_pauses_armed_followup(isolated_test_db)
 
 
 # ---------------------------------------------------------------------------
-# 13. Sent history and quarantined messages are never touched by sync.
+# 13. Sent history is never touched by sync.
 # ---------------------------------------------------------------------------
-async def test_sync_skips_sent_and_quarantined_followups(isolated_test_db):
+async def test_sync_skips_sent_followups(isolated_test_db):
     db = isolated_test_db
     _cid, _contact_id, recipient, msg_ids = await make_sequence(db, name="Skip Sync Co")
     now = datetime.now(timezone.utc)
@@ -704,19 +704,12 @@ async def test_sync_skips_sent_and_quarantined_followups(isolated_test_db):
         {"_id": msg_ids[2]},
         {"$set": {"status": "sent", "sentAt": now, "subject": "sent history"}},
     )
-    await db.outreachmessages.update_one(
-        {"_id": msg_ids[3]},
-        {"$set": {
-            "status": "draft",
-            "quarantined": True,
-            "quarantine": {"batch": "quarantine-20261009", "reason": "test"},
-        }},
-    )
 
     _updated, sync = await update_outreach_message(
         str(msg_ids[1]), {"recipientEmail": "new.recipient@emailsync.example"}
     )
-    assert sync["updated"] == 0
+    # Step 2 is sent (ineligible); Step 3 is still a draft (eligible).
+    assert sync["updated"] == 1
     assert sync["conflicts"] == []
 
     m2 = await db.outreachmessages.find_one({"_id": msg_ids[2]})
@@ -725,10 +718,8 @@ async def test_sync_skips_sent_and_quarantined_followups(isolated_test_db):
     assert m2["subject"] == "sent history"
 
     m3 = await db.outreachmessages.find_one({"_id": msg_ids[3]})
-    assert m3["recipientEmail"] == recipient       # quarantined untouched
+    assert m3["recipientEmail"] == "new.recipient@emailsync.example"
     assert m3["status"] == "draft"
-    assert m3["quarantined"] is True
-    assert m3["quarantine"]["batch"] == "quarantine-20261009"
 
 
 # ---------------------------------------------------------------------------
@@ -785,7 +776,7 @@ _PRESERVE_EXCEPT = {
 }
 
 
-async def _insert_production_shaped_sequence(db, *, name, recipients, quarantined_steps=()):
+async def _insert_production_shaped_sequence(db, *, name, recipients):
     """Three draft messages shaped exactly like the live collection."""
     now = datetime.now(timezone.utc)
     cid, contact_id, _ = await make_company(db, name=name, recipient=recipients[1],
@@ -814,10 +805,6 @@ async def _insert_production_shaped_sequence(db, *, name, recipients, quarantine
         if step != 1:
             doc["delayDays"] = step * 3
             doc["scheduledAt"] = datetime(2026, 10, 20, tzinfo=timezone.utc)
-        if step in quarantined_steps:
-            doc["quarantined"] = True
-            doc["quarantine"] = "quarantine-20261009"
-            doc["quarantineOriginal"] = {"status": "scheduled"}
         ids[step] = (await db.outreachmessages.insert_one(doc)).inserted_id
     return cid, contact_id, ids
 
@@ -875,21 +862,19 @@ async def test_production_shaped_step1_save_syncs_blank_and_placeholder_followup
     assert step1["contactId"] == contact_id
 
 
-async def test_production_shaped_conflict_quarantine_and_invalid_recipient(isolated_test_db):
+async def test_production_shaped_conflict_and_invalid_recipient(isolated_test_db):
     db = isolated_test_db
 
-    # (a) a different VALID follow-up recipient is a conflict; a quarantined
-    #     follow-up is never touched.
+    # (a) a different VALID follow-up recipient is a conflict and is never
+    #     overwritten; the placeholder follow-up is still synchronized.
     cid, _ct, ids = await _insert_production_shaped_sequence(
         db, name="Prod Shape Conflict Co",
         recipients={1: "Not publicly available", 2: "different.valid@other.example",
                     3: "Not publicly available"},
-        quarantined_steps=(3,),
     )
-    before3 = await db.outreachmessages.find_one({"_id": ids[3]})
     body = await update_message_route(str(ids[1]), _payload_for_step1())
 
-    assert body["recipientSync"]["updated"] == 0
+    assert body["recipientSync"]["updated"] == 1
     assert [c["step"] for c in body["recipientSync"]["conflicts"]] == [2]
     assert "different recipient" in body["message"].lower()
 
@@ -900,10 +885,8 @@ async def test_production_shaped_conflict_quarantine_and_invalid_recipient(isola
     assert m2["previousRecipient"] == "different.valid@other.example"
 
     m3 = await db.outreachmessages.find_one({"_id": ids[3]})
-    assert m3["quarantined"] is True
+    assert m3["recipientEmail"] == _PROD_NEW_ADDR
     assert m3["status"] == "draft"
-    assert m3["recipientEmail"] == before3["recipientEmail"]          # quarantined: untouched
-    assert "recipientSyncedFromStep1" not in m3
 
     # (b) an invalid new address is saved on Step 1 but never propagated.
     cid2, _ct2, ids2 = await _insert_production_shaped_sequence(
@@ -930,7 +913,7 @@ async def test_production_shaped_conflict_quarantine_and_invalid_recipient(isola
 # 11. Step 1 CC synchronization onto unsent Step 2/3 follow-ups.
 #     Only `ccRecipients` moves: each follow-up keeps its own subject, HTML and
 #     plain-text body, its primary recipient + name, its BCC, its status, its
-#     delays and its schedule. Sent and quarantined rows are never eligible.
+#     delays and its schedule. Sent rows are never eligible.
 # ---------------------------------------------------------------------------
 
 def _cc_only_payload(step1: dict, cc: list) -> dict:
@@ -951,13 +934,12 @@ def _cc_only_payload(step1: dict, cc: list) -> dict:
     }
 
 
-async def _cc_sequence(db, *, name, quarantined_steps=()):
+async def _cc_sequence(db, *, name):
     """Production-shaped sequence where all three steps share one recipient."""
     recipient = f"{name.lower().replace(' ', '.')}@tksr.example"
     return await _insert_production_shaped_sequence(
         db, name=name,
         recipients={1: recipient, 2: recipient, 3: recipient},
-        quarantined_steps=quarantined_steps,
     )
 
 
@@ -1129,9 +1111,9 @@ async def test_cc_sync_never_overwrites_a_conflicting_followup_recipient(isolate
     assert m3["subject"] == before3["subject"]
 
 
-async def test_cc_sync_skips_sent_and_quarantined_followups(isolated_test_db):
+async def test_cc_sync_skips_sent_followups(isolated_test_db):
     db = isolated_test_db
-    _cid, _ct, ids = await _cc_sequence(db, name="CC Skip Co", quarantined_steps=(3,))
+    _cid, _ct, ids = await _cc_sequence(db, name="CC Skip Co")
     now = datetime.now(timezone.utc)
     await db.outreachmessages.update_one(
         {"_id": ids[2]},
@@ -1139,14 +1121,13 @@ async def test_cc_sync_skips_sent_and_quarantined_followups(isolated_test_db):
     )
     step1 = await db.outreachmessages.find_one({"_id": ids[1]})
     before2 = await db.outreachmessages.find_one({"_id": ids[2]})
-    before3 = await db.outreachmessages.find_one({"_id": ids[3]})
 
     _updated, sync = await update_outreach_message(
         str(ids[1]), _cc_only_payload(step1, ["legal@tksr.example"])
     )
 
-    # Both follow-ups are ineligible: nothing to synchronize, nothing reported.
-    assert sync["ccUpdated"] == 0
+    # Step 2 is sent (ineligible); Step 3 is still a draft and is synchronized.
+    assert sync["ccUpdated"] == 1
     assert sync["updated"] == 0 and sync["paused"] == 0 and sync["conflicts"] == []
 
     m2 = await db.outreachmessages.find_one({"_id": ids[2]})
@@ -1154,7 +1135,5 @@ async def test_cc_sync_skips_sent_and_quarantined_followups(isolated_test_db):
     assert m2["status"] == "sent"
 
     m3 = await db.outreachmessages.find_one({"_id": ids[3]})
-    assert m3 == before3                                   # quarantined untouched
-    assert m3["quarantined"] is True
-    assert m3["status"] == "draft"                          # never reactivated
-    assert m3["quarantineOriginal"] == {"status": "scheduled"}
+    assert m3["ccRecipients"] == ["legal@tksr.example"]
+    assert m3["status"] == "draft"

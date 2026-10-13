@@ -1,4 +1,3 @@
-import hashlib
 import re
 import logging
 from datetime import datetime, timedelta, timezone
@@ -19,7 +18,6 @@ from app.services.send_guard import (
     validate_recipient_email,
     check_recipient_domain_alignment,
     check_contact_and_greeting_consistency,
-    is_message_quarantined,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,8 +76,8 @@ async def _eligible_followups(db, company_oid) -> list:
     """Unsent Step 2/3 messages for a company.
 
     Identified by the stable company + sequence-step relationship (never by the
-    previous recipient alone), excluding sent/sending history and quarantined
-    messages so a parked sequence can never be edited by synchronization.
+    previous recipient alone), excluding sent/sending history so a parked
+    sequence can never be edited by synchronization.
     """
     cursor = (
         db.outreachmessages.find(
@@ -87,8 +85,6 @@ async def _eligible_followups(db, company_oid) -> list:
                 "companyId": company_oid,
                 "step": {"$in": [2, 3]},
                 "status": {"$nin": list(_FOLLOWUP_LOCKED_STATUSES)},
-                "quarantined": {"$ne": True},
-                "quarantine.active": {"$ne": True},
             }
         )
         .sort("step", 1)
@@ -108,7 +104,7 @@ async def _sync_followup_recipients(company_oid, old_email: str, new_email: str,
                     old Step-1 recipient: recipient (+ name) are updated.
       * conflict -> recipient is a *different valid* address: never overwritten;
                     flagged (and paused if armed) for manual review.
-      * sent / sending / quarantined -> never touched.
+      * sent / sending -> never touched.
 
     CC/BCC, subject, body, status, delayDays and scheduledAt are preserved.
     """
@@ -210,7 +206,7 @@ async def _sync_followup_cc(company_oid, cc_list, now) -> dict:
 
     Only `ccRecipients` (and `updatedAt`) is written: subject, HTML/plain-text
     body, primary recipient, recipient name, BCC, status, delays and dates are
-    left exactly as they are. Sent and quarantined messages are excluded by
+    left exactly as they are. Sent messages are excluded by
     `_eligible_followups`, so a parked sequence can never be reactivated here.
     A follow-up that already carries this CC list is skipped so an unchanged
     save produces no write churn.
@@ -490,35 +486,6 @@ Return a strict JSON object with this exact schema:
             'updatedAt': now
         }
 
-        # Enforce quarantine on follow-up drafts (steps 2 and 3)
-        if step in (2, 3):
-            existing_batch = (prev.get('quarantine') or {}).get('batch') if prev else None
-            if existing_batch:
-                batch_id = existing_batch
-            elif company.get('importBatchId'):
-                batch_id = f"quarantine-import-{str(company['importBatchId'])}"
-            else:
-                batch_id = f"quarantine-{str(cid)}"
-
-            doc_hash = hashlib.sha256(f"{cid}_{step}_{subject}_{body_text}".encode('utf-8')).hexdigest()
-
-            # Preserve explicit authorized release if already performed by operator
-            if prev and prev.get('quarantined') is False and prev.get('quarantineReleased'):
-                msg_doc['quarantined'] = False
-                msg_doc['quarantineReleased'] = prev['quarantineReleased']
-                if 'quarantine' in prev:
-                    msg_doc['quarantine'] = prev['quarantine']
-            else:
-                msg_doc['quarantined'] = True
-                msg_doc['quarantine'] = {
-                    "active": True,
-                    "batch": batch_id,
-                    "reason": (prev.get('quarantine') or {}).get('reason') if prev else "new_import_safety_review",
-                    "appliedAt": (prev.get('quarantine') or {}).get('appliedAt') if prev else now,
-                    "originalStatus": "draft",
-                    "docHash": doc_hash,
-                }
-
         # Validation safeguards (Phase 4): Domain & Greeting / Contact consistency checks
         domain_check = check_recipient_domain_alignment(msg_doc.get('recipientEmail'), company.get('website', ''))
         greeting_line = (msg_doc.get('bodyText') or '').strip().split('\n')[0].strip() if msg_doc.get('bodyText') else ''
@@ -597,47 +564,6 @@ async def get_all_outreach(query_params: dict = None):
 
     return serialize_doc(results)
 
-def _validate_quarantined_draft_update(update_data: dict) -> None:
-    """Validation for the quarantined-draft manual-edit workflow.
-
-    An operator may open a quarantined draft and correct its To/CC/BCC,
-    recipient name, subject and bodies. The save must fail loudly (HTTP 400
-    with a clear message) on malformed addresses instead of silently persisting
-    a draft that could never be sent, and must never act on `status`,
-    `quarantined`, `quarantine` or `quarantineOriginal` — those fields are not
-    part of the update whitelist below, so a save can never approve, arm,
-    schedule, send or un-quarantine anything.
-    """
-    def _check(value, label: str) -> None:
-        email = _normalize_email(value)
-        if email and not validate_recipient_email(email):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{label} email address is invalid: '{value}'. "
-                       "Correct it (or clear the field) and save again.",
-            )
-
-    if "recipientEmail" in update_data:
-        _check(update_data.get("recipientEmail"), "Recipient")
-    for field, label in (("ccRecipients", "CC"), ("bccRecipients", "BCC")):
-        if field not in update_data:
-            continue
-        raw = update_data.get(field)
-        if raw is not None and not isinstance(raw, list):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{label} recipients must be a list of email addresses.",
-            )
-        for entry in raw or []:
-            _check(entry, label)
-    for field in ("subject", "bodyHtml", "bodyText", "recipientName"):
-        if field in update_data and update_data[field] is not None and not isinstance(update_data[field], str):
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{field}' must be text.",
-            )
-
-
 async def update_outreach_message(message_id: str, update_data: dict):
     """Update one outreach message.
 
@@ -651,12 +577,10 @@ async def update_outreach_message(message_id: str, update_data: dict):
       unsent Step 2/3 messages. Only `ccRecipients` moves: each follow-up keeps
       its own subject/bodies, primary recipient, recipient name and BCC, and no
       BCC is ever synchronized.
-    * Quarantined-draft manual edit: To/CC/BCC, recipient name, subject and
-      bodies may be corrected after strict email-format validation (HTTP 400
-      with a clear message otherwise). The save never changes `status` (stays
-      `draft`), never touches `quarantined`/`quarantine`/`quarantineOriginal`,
-      and never sends, schedules, approves or activates anything. Each message
-      keeps its own subject/bodies — edits never rewrite another step's content.
+    * Draft manual edit: To/CC/BCC, recipient name, subject and bodies may be
+      corrected. The save never changes `status` (stays `draft`) and never
+      sends, schedules, approves or activates anything. Each message keeps its
+      own subject/bodies — edits never rewrite another step's content.
 
     Returns (serialized_message, sync_info) — the router surfaces sync_info to
     the caller so the UI can explain what happened. `sync_info` reports
@@ -680,12 +604,6 @@ async def update_outreach_message(message_id: str, update_data: dict):
     now = datetime.now(timezone.utc)
     step = int(message.get('step') or 1)
     is_sent = message.get('status') == 'sent'
-    # Quarantined-draft manual edit workflow: content/recipient fields only,
-    # with strict address validation. `status`, `quarantined` and the
-    # quarantine preimage are never part of the whitelist below, so saving can
-    # not approve, schedule, send or un-quarantine this message (or any other).
-    if is_message_quarantined(message) and not is_sent:
-        _validate_quarantined_draft_update(update_data)
     old_recipient = _normalize_email(message.get('recipientEmail'))
     new_recipient_raw = update_data.get('recipientEmail')
     recipient_changed = (

@@ -13,9 +13,9 @@ import pytest
 # test suite. This is a test-process-only patch: the running backend and all
 # live data are unaffected.
 #
-# Tests that already bind their own isolated databases (test_quarantine_guard,
-# test_scheduling_policy, test_primary_email_and_sync) swap the binding
-# themselves and continue to work unchanged.
+# Tests that already bind their own isolated databases (test_scheduling_policy,
+# test_primary_email_and_sync) swap the binding themselves and continue to work
+# unchanged.
 # ---------------------------------------------------------------------------
 import app.config.database as _db_module
 
@@ -61,3 +61,4 @@ def setup_test_environment():
     os.environ.setdefault("APP_TZ_OFFSET_MINUTES", "0")
     # E8: do not enable strict recipient-domain matching during tests (default)
     os.environ.setdefault("ENFORCE_RECIPIENT_DOMAIN_MATCH", "false")
+    os.environ.setdefault("ENABLE_SCHEDULER", "true")

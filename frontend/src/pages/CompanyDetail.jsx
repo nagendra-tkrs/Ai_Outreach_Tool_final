@@ -5,15 +5,14 @@ import { deriveSequenceState, SEQUENCE_STATE_META } from '../utils/outreachStats
 import {
   applyLocalEdit,
   describeRecipientSync,
+  describeScheduleResult,
   findInvalidEmails,
   getActiveStepMessage,
   isLockedMessage,
-  isQuarantined,
   mergeServerMessages,
   resolveStepMessage,
   shouldRefetchAfterSave,
 } from '../utils/outreachEditor';
-import QuarantineReleaseModal from '../components/QuarantineReleaseModal';
 
 const CRAWL_STATUS_STYLES = {
   pending: 'bg-slate-100 text-slate-600',
@@ -204,7 +203,6 @@ export default function CompanyDetail() {
   const [showBccInput, setShowBccInput] = useState(false);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [scheduleConfig, setScheduleConfig] = useState({ step2Days: 3, step3Days: 6 });
-  const [quarantineReleaseTarget, setQuarantineReleaseTarget] = useState(null);
 
   // Per-step working copies + dirty flags. A single shared `editingMessage`
   // used to be replaced on every step switch / refetch, silently discarding
@@ -584,8 +582,8 @@ export default function CompanyDetail() {
     try {
       const isSent = isLockedMessage(editingMessage);
       // Manual-edit save: block malformed To/CC/BCC client-side with one clear
-      // message before any request is made. The backend re-validates
-      // quarantined drafts and answers 400 (surfaced via the api interceptor).
+      // message before any request is made. The backend re-validates drafts and
+      // answers 400 (surfaced via the api interceptor).
       if (!isSent) {
         const invalidEmails = findInvalidEmails({
           recipientEmail: editingMessage.recipientEmail,
@@ -630,7 +628,7 @@ export default function CompanyDetail() {
         if (savedStep === 1 && sync) {
           for (const stepNum of [2, 3]) {
             const followUp = nextDrafts[stepNum];
-            if (followUp && !isLockedMessage(followUp) && !isQuarantined(followUp)) {
+            if (followUp && !isLockedMessage(followUp)) {
               const patch = {};
               if (sync.updated > 0) {
                 patch.recipientEmail = updated.recipientEmail;
@@ -654,7 +652,7 @@ export default function CompanyDetail() {
       setOutreachMessages((prev) =>
         prev.map((m) => {
           if (m._id === updated._id) return updated;
-          if (savedStep === 1 && (m.step === 2 || m.step === 3) && !isLockedMessage(m) && !isQuarantined(m)) {
+          if (savedStep === 1 && (m.step === 2 || m.step === 3) && !isLockedMessage(m)) {
             const patch = {};
             if (sync?.updated > 0) {
               patch.recipientEmail = updated.recipientEmail;
@@ -733,10 +731,6 @@ export default function CompanyDetail() {
 
   const handleSendEmail = async () => {
     if (!editingMessage) return;
-    if (isQuarantined(editingMessage)) {
-      setError('This message is quarantined. Review and release it before sending.');
-      return;
-    }
     // FIX 4: a sent message must never be resent from the UI.
     if (editingMessage.status === 'sent') {
       setError('This email has already been sent. Duplicate sends are blocked.');
@@ -757,8 +751,15 @@ export default function CompanyDetail() {
       setStepDirty(editingMessage.step, false);
       await fetchOutreach();
       await fetchCompanyData();
+      if (editingMessage.step === 1) {
+        setSuccessMsg('Step 1 sent successfully. Automated drip follow-ups have been scheduled.');
+        setTimeout(() => setSuccessMsg(''), 6000);
+      } else {
+        setSuccessMsg(`Step ${editingMessage.step} sent successfully!`);
+        setTimeout(() => setSuccessMsg(''), 5000);
+      }
     } catch (err) {
-      setError(`Failed to send email: ${err.message}`);
+      setError(`Failed to send email: ${err.response?.data?.message || err.message}`);
     } finally {
       setSendingEmail(false);
     }
@@ -766,8 +767,9 @@ export default function CompanyDetail() {
 
   const handleActivateSchedule = async () => {
     setScheduling(true);
+    setError('');
     try {
-      await api.post(`/companies/${companyId}/outreach/schedule`, {
+      const res = await api.post(`/companies/${companyId}/outreach/schedule`, {
         schedules: [
           { step: 1, delayDays: 0 },
           { step: 2, delayDays: Number(scheduleConfig.step2Days) || 3 },
@@ -776,10 +778,16 @@ export default function CompanyDetail() {
       });
       setShowScheduleModal(false);
       await fetchOutreach();
-      setSuccessMsg('Drip schedule activated. Step 1 is approved for manual send; Steps 2 and 3 will auto-send on their configured delays.');
-      setTimeout(() => setSuccessMsg(''), 5000);
+      const step1Msg = outreachMessages.find((m) => m.step === 1);
+      const feedback = describeScheduleResult(res?.data || res, step1Msg || editingMessage);
+      if (feedback.tone === 'warning') {
+        setError(feedback.message);
+      } else {
+        setSuccessMsg(feedback.message);
+        setTimeout(() => setSuccessMsg(''), 5000);
+      }
     } catch (err) {
-      setError(`Failed to schedule sequence: ${err.message}`);
+      setError(`Failed to schedule sequence: ${err.response?.data?.message || err.message}`);
     } finally {
       setScheduling(false);
     }
@@ -2523,25 +2531,6 @@ export default function CompanyDetail() {
                       }`}>
                         {editingMessage.status}
                       </span>
-                      {(editingMessage.quarantined === true || isQuarantined(editingMessage)) && (
-                        <div className="flex items-center gap-2">
-                          <span
-                            className="text-[10px] bg-rose-50 text-rose-700 font-bold px-2 py-0.5 rounded-full border border-rose-200"
-                            title="This draft is quarantined (pre-deployment safety review). You can edit and save it freely; sending and scheduling are blocked server-side."
-                          >
-                            🔒 Quarantined — editing allowed, sending blocked
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setQuarantineReleaseTarget(editingMessage)}
-                            className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-300 rounded-lg text-[10px] font-bold transition-colors shadow-2xs flex items-center gap-1 cursor-pointer"
-                            title="Open authenticated modal to release this specific draft from quarantine"
-                          >
-                            <span>🔓</span>
-                            <span>Release Quarantine</span>
-                          </button>
-                        </div>
-                      )}
                       {editingMessage.isManuallyEdited && (
                         <span className="text-[10px] bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded-full border border-blue-200">
                           ✏️ Custom Edited
@@ -2585,12 +2574,10 @@ export default function CompanyDetail() {
                         <button
                           type="button"
                           onClick={handleSendEmail}
-                          disabled={sendingEmail || !editingMessage.recipientEmail || isQuarantined(editingMessage)}
+                          disabled={sendingEmail || !editingMessage.recipientEmail}
                           className="px-6 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 text-white rounded-xl text-xs font-bold hover:from-emerald-700 hover:to-teal-700 transition-colors shadow-md disabled:opacity-50 flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
                           title={
-                            isQuarantined(editingMessage)
-                              ? 'This message is quarantined. Review and release it before sending.'
-                              : !editingMessage.recipientEmail
+                            !editingMessage.recipientEmail
                               ? 'Recipient email is required to send'
                               : 'Send Email Now (with CC/BCC)'
                           }
@@ -2762,17 +2749,6 @@ export default function CompanyDetail() {
           </div>
         </div>
       )}
-
-      {/* Quarantine Release Modal */}
-      <QuarantineReleaseModal
-        isOpen={Boolean(quarantineReleaseTarget)}
-        onClose={() => setQuarantineReleaseTarget(null)}
-        message={quarantineReleaseTarget}
-        companyName={company?.companyName}
-        onSuccess={() => {
-          fetchOutreach();
-        }}
-      />
     </div>
   );
 }

@@ -130,11 +130,11 @@ export function shouldRefetchAfterSave({ isSent = false, sync = null } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Quarantined-draft manual-edit workflow: address validation helpers.
+// Draft manual-edit workflow: address validation helpers.
 // Mirrors the backend's EMAIL_RE so a malformed To/CC/BCC is caught BEFORE the
 // PUT and the operator gets one clear, actionable message. Blank / omitted
 // values are allowed — a draft may be saved with an empty To and completed
-// later (sending stays blocked server-side for quarantined drafts anyway).
+// later.
 // ---------------------------------------------------------------------------
 
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/;
@@ -161,26 +161,17 @@ export function findInvalidEmails({ recipientEmail, ccRecipients, bccRecipients 
 }
 
 // ---------------------------------------------------------------------------
-// Quarantined-draft manual-edit workflow: sent/locked display helpers.
+// Draft manual-edit workflow: sent/locked display helpers.
 //
 // A message is treated as immutable "sent history" ONLY when it is genuinely
-// sent AND not quarantined. A quarantined draft (status=draft,
-// quarantined=true) stays fully editable — recipient, CC, recipient name,
-// subject and body — even if a stale binding ever carried a non-draft status
-// onto it. These helpers keep the banner, tab badge and status pill
-// consistent with the message actually bound to the selected step.
+// sent. These helpers keep the banner, tab badge and status pill consistent
+// with the message actually bound to the selected step.
 // ---------------------------------------------------------------------------
 
-export function isQuarantined(message) {
-  if (!message || typeof message !== 'object') return false;
-  return message.quarantined === true || Boolean(message.quarantine && message.quarantine.active === true);
-}
-
-// True only for genuine sent history: sent AND not quarantined. Gates the
-// "Sent message — history preserved" banner, the SENT tab badge and the
-// status pill so a quarantined draft is never presented as locked sent history.
+// True only for genuine sent history. Gates the "Sent message — history
+// preserved" banner, the SENT tab badge and the status pill.
 export function isLockedMessage(message) {
-  return Boolean(message) && message.status === 'sent' && !isQuarantined(message);
+  return Boolean(message) && message.status === 'sent';
 }
 
 // Which message should the UI treat as active for a step? Prefer the bound
@@ -191,4 +182,53 @@ export function getActiveStepMessage(draftsByStep, serverMessages, selectedStep,
   if (editingMessage && editingMessage.step === selectedStep) return editingMessage;
   const reResolved = resolveStepMessage(draftsByStep, serverMessages, selectedStep);
   return reResolved || editingMessage || null;
+}
+
+// ---------------------------------------------------------------------------
+// Drip scheduling feedback helpers.
+// Accurately reports whether Step 1 is already sent or approved, and which
+// follow-ups were armed or blocked based on actual backend data.
+// ---------------------------------------------------------------------------
+
+export function describeScheduleResult(res, step1Msg = null) {
+  if (!res) return { tone: 'info', message: 'Drip schedule updated.' };
+  const rawMsg = res.message || res.data?.message || '';
+  const data = Array.isArray(res.data) ? res.data : (Array.isArray(res) ? res : []);
+
+  const isStep1Sent = Boolean(step1Msg && step1Msg.status === 'sent');
+  const scheduledFollowups = data.filter((m) => m && m.step > 1 && m.status === 'scheduled');
+  const draftFollowups = data.filter((m) => m && m.step > 1 && m.status === 'draft');
+
+  if (draftFollowups.length > 0 && scheduledFollowups.length === 0) {
+    return {
+      tone: 'warning',
+      message: 'Follow-ups could not be scheduled due to missing or invalid recipient addresses. Review contacts before scheduling.',
+    };
+  }
+
+  if (isStep1Sent) {
+    if (scheduledFollowups.length > 0) {
+      const stepNames = scheduledFollowups.map((s) => `Step ${s.step}`).join(' & ');
+      return {
+        tone: 'success',
+        message: `Drip schedule activated. Step 1 was previously sent; ${stepNames} scheduled to auto-send on configured delays.`,
+      };
+    }
+    return {
+      tone: 'info',
+      message: rawMsg || 'Drip schedule updated.',
+    };
+  }
+
+  if (rawMsg) {
+    return {
+      tone: 'success',
+      message: rawMsg,
+    };
+  }
+
+  return {
+    tone: 'success',
+    message: 'Drip schedule activated. Step 1 is approved for manual send; Steps 2 and 3 will auto-send on their configured delays.',
+  };
 }

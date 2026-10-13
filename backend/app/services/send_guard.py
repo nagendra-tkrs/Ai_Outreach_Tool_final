@@ -285,27 +285,6 @@ SUSPICIOUS_NAME_TOKENS = {
 }
 
 
-def is_message_quarantined(message: dict) -> bool:
-    """Conservative check whether an outreach message is quarantined.
-
-    Returns True if:
-    - message['quarantined'] is True, OR
-    - message['quarantine']['active'] is True.
-
-    Explicitly released messages have quarantined=False and quarantineReleased metadata.
-    """
-    if not message or not isinstance(message, dict):
-        return False
-    if message.get("quarantined") is True:
-        return True
-    if message.get("quarantined") is False and message.get("quarantineReleased"):
-        return False
-    q = message.get("quarantine")
-    if isinstance(q, dict) and q.get("active") is True:
-        return True
-    return False
-
-
 def normalize_website_domain(url_or_domain: str) -> str:
     """Extract and normalize bare domain from website URL or string."""
     if not url_or_domain:
