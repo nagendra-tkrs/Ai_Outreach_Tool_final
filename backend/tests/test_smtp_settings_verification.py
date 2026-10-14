@@ -32,10 +32,15 @@ async def isolate_settings_per_test():
 
 
 
+from app.auth.security import create_access_token
+
+
 @pytest.fixture
 async def client():
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+    token = create_access_token("test_admin")
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", headers=headers) as c:
         yield c
 
 

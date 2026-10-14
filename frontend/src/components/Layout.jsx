@@ -1,4 +1,7 @@
+import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
+import { API_BASE_URL, isAuthenticated, logout } from '../api';
+import LoginModal from './LoginModal';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: '📊', description: 'Overview & pipeline metrics' },
@@ -10,6 +13,32 @@ const navItems = [
 
 export default function Layout() {
   const location = useLocation();
+  const [authed, setAuthed] = useState(() => isAuthenticated());
+  const [loginOpen, setLoginOpen] = useState(false);
+
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      setAuthed(false);
+      setLoginOpen(true);
+    };
+
+    const handleLogout = () => {
+      setAuthed(false);
+      setLoginOpen(true);
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('auth:unauthorized', handleUnauthorized);
+      window.addEventListener('auth:logout', handleLogout);
+    }
+
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('auth:unauthorized', handleUnauthorized);
+        window.removeEventListener('auth:logout', handleLogout);
+      }
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-50/70 flex flex-col md:flex-row antialiased selection:bg-indigo-500 selection:text-white">
@@ -97,6 +126,33 @@ export default function Layout() {
               5 Phases Live
             </span>
           </div>
+
+          {/* Admin Auth Status Card */}
+          <div className="bg-slate-900/90 rounded-xl p-3 border border-slate-800/80 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2">
+              <span className={`h-2 w-2 rounded-full ${authed ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+              <span className="text-slate-300 font-medium text-[11px]">
+                {authed ? 'Admin Session' : 'Unauthenticated'}
+              </span>
+            </div>
+            {authed ? (
+              <button
+                type="button"
+                onClick={() => logout()}
+                className="text-[10px] font-semibold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 px-2 py-0.5 rounded border border-slate-700 transition-colors"
+              >
+                Sign Out
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setLoginOpen(true)}
+                className="text-[10px] font-semibold text-indigo-300 hover:text-white bg-indigo-600/30 hover:bg-indigo-600/50 px-2 py-0.5 rounded border border-indigo-500/30 transition-colors"
+              >
+                Sign In
+              </button>
+            )}
+          </div>
         </div>
       </aside>
 
@@ -118,7 +174,7 @@ export default function Layout() {
               <span>AI Engine: Local Ollama &amp; Deep Crawl</span>
             </div>
             <a
-              href="http://localhost:5000/api/health"
+              href={`${API_BASE_URL}/health`}
               target="_blank"
               rel="noreferrer"
               className="text-xs font-semibold text-indigo-600 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100/80 px-3 py-1.5 rounded-lg transition-colors border border-indigo-100 flex items-center gap-1.5"
@@ -134,6 +190,17 @@ export default function Layout() {
           <Outlet />
         </div>
       </main>
+
+      {/* Login Authentication Modal */}
+      <LoginModal
+        isOpen={loginOpen || !authed}
+        onClose={() => setLoginOpen(false)}
+        onSuccess={() => {
+          setAuthed(true);
+          setLoginOpen(false);
+          window.location.reload();
+        }}
+      />
     </div>
   );
 }

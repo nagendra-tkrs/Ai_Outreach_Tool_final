@@ -8,12 +8,16 @@ venv/
 ENV/
 env/
 
-# Environment variables
+# Environment variables and secrets
 .env
 .env.*
 *.env
 !.env.example
 !**/.env.example
+*service-account*.json
+*service_account*.json
+credentials*.json
+firebase-credentials.json
 
 # Python
 __pycache__/
@@ -55,3 +59,6 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Local audit spreadsheets (kept local only, never committed)
+EMAIL_SEND_AND_DRIP_SCHEDULE_AUDIT_2026-10-14.xlsx

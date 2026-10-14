@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
-    "test": "node --test",
+    "test": "node --test src/api.test.js src/utils/outreachEditor.test.js src/utils/outreachStats.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -7,6 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config.database import close_db, connect_db
+from app.auth.middleware import AuthMiddleware
+from app.auth.security import validate_auth_config_for_production
+from app.routers.auth_routes import router as auth_router
 from app.routers.company_routes import router as company_router
 from app.routers.contact_routes import router as contact_router
 from app.routers.crawl_routes import router as crawl_router
@@ -25,7 +28,8 @@ logger = logging.getLogger("ai_outreach")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup: validate production auth configuration before initializing resources
+    validate_auth_config_for_production()
     logger.info("Initializing application resources...")
     await connect_db()
     start_scheduler(60)
@@ -58,6 +62,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AuthMiddleware)
 
 
 @app.exception_handler(HTTPException)
@@ -79,6 +84,7 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 # Mount routers matching Node backend endpoints
 app.include_router(health_router, prefix="/api", tags=["Health"])
+app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(import_router, prefix="/api/import", tags=["Import"])
 app.include_router(company_router, prefix="/api/companies", tags=["Companies"])
 app.include_router(crawl_router, prefix="/api", tags=["Crawler"])

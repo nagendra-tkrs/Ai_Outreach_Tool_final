@@ -14,10 +14,14 @@ async def setup_database():
     yield
     await close_db()
 
+from app.auth.security import create_access_token
+
 @pytest.fixture
 async def client():
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+    token = create_access_token("test_admin")
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver", headers=headers) as c:
         yield c
 
 async def test_health_check(client):

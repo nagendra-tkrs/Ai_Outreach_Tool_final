@@ -43,3 +43,10 @@ def get_db():
 
 get_database = get_db
 
+# Backend selection helpers (defaults to MongoDB unless DATABASE_BACKEND=firestore is set)
+from app.config.firestore_config import (
+    get_database_backend,
+    is_firestore_backend,
+    is_mongodb_backend,
+)
+
